@@ -1161,7 +1161,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive (.tar.gz)</div>
         </div>
 
-        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz" onchange="handleFile(this.files[0])">
+        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,application/gzip,application/x-gzip,application/x-tar" onchange="handleFile(this.files[0])">
         
         <div id="message" class="message"></div>
         
@@ -1287,7 +1287,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
     <div id="filenameModal" class="modal">
         <div class="modal-content">
             <h2>Save Track Template</h2>
-            <input type="text" id="filenameInput" placeholder="Enter filename" value="DiGiCo_Tracks">
+            <input type="text" id="filenameInput" placeholder="Enter filename" value="TrackTemplate">
             <div class="modal-buttons">
                 <button class="btn-secondary" onclick="closeFilenameModal()">Cancel</button>
                 <button class="btn-primary" onclick="confirmDownload()">Download</button>
@@ -1596,7 +1596,9 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         
         function handleFile(file) {
             if (!file) return;
-            
+
+            ['inputs', 'aux', 'groups', 'matrix'].forEach(type => clearColorFromSection(type));
+
             const formData = new FormData();
             formData.append('file', file);
             
@@ -1729,7 +1731,18 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 checkbox.className = 'track-checkbox';
                 checkbox.dataset.idx = idx;
                 checkbox.checked = selectedChannels.has(idx);
-                checkbox.onchange = () => toggleChannel(idx);
+                checkbox.onchange = () => {
+                    if (activeChannels.has(idx) && activeChannels.size > 1) {
+                        if (checkbox.checked) {
+                            activeChannels.forEach(i => selectedChannels.add(i));
+                        } else {
+                            activeChannels.forEach(i => selectedChannels.delete(i));
+                        }
+                        showPreview(currentCombinedChannels);
+                    } else {
+                        toggleChannel(idx);
+                    }
+                };
                 
                 const number = document.createElement('span');
                 number.className = 'track-number';
@@ -1781,16 +1794,28 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
 
                 clearBadge.addEventListener('click', (e) => {
                     e.stopPropagation();
-                    currentCombinedChannels[idx].color = null;
-                    colorBtn.style.backgroundColor = '';
-                    colorBtn.classList.remove('has-color');
-                    colorInput.value = '#ff6b6b';
+                    const targets = (activeChannels.has(idx) && activeChannels.size > 1)
+                        ? Array.from(activeChannels) : [idx];
+                    targets.forEach(i => { currentCombinedChannels[i].color = null; });
+                    if (targets.length > 1) {
+                        showPreview(currentCombinedChannels);
+                    } else {
+                        colorBtn.style.backgroundColor = '';
+                        colorBtn.classList.remove('has-color');
+                        colorInput.value = '#ff6b6b';
+                    }
                 });
 
                 colorInput.addEventListener('change', (e) => {
-                    currentCombinedChannels[idx].color = e.target.value;
-                    colorBtn.style.backgroundColor = e.target.value;
-                    colorBtn.classList.add('has-color');
+                    const targets = (activeChannels.has(idx) && activeChannels.size > 1)
+                        ? Array.from(activeChannels) : [idx];
+                    targets.forEach(i => { currentCombinedChannels[i].color = e.target.value; });
+                    if (targets.length > 1) {
+                        showPreview(currentCombinedChannels);
+                    } else {
+                        colorBtn.style.backgroundColor = e.target.value;
+                        colorBtn.classList.add('has-color');
+                    }
                 });
 
                 const editBtn = document.createElement('button');
@@ -1854,8 +1879,34 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             if (!activeChannels.has(draggedIndex)) {
                 activeChannels.clear();
             }
-            e.currentTarget.classList.add('dragging');
             e.dataTransfer.effectAllowed = 'move';
+
+            // Dim entire block in place
+            document.querySelectorAll('.track-item').forEach(el => {
+                if (activeChannels.has(parseInt(el.dataset.index))) {
+                    el.classList.add('dragging');
+                }
+            });
+            if (!activeChannels.has(draggedIndex)) {
+                e.currentTarget.classList.add('dragging');
+            }
+
+            // Build a ghost showing all active rows
+            const ghost = document.createElement('div');
+            ghost.style.cssText = 'position:fixed;top:-9999px;left:-9999px;pointer-events:none;z-index:9999;';
+            const indices = activeChannels.size > 0 ? Array.from(activeChannels).sort((a,b)=>a-b) : [draggedIndex];
+            indices.forEach(i => {
+                const src = document.querySelector(`.track-item[data-index="${i}"]`);
+                if (src) {
+                    const clone = src.cloneNode(true);
+                    clone.style.cssText = 'opacity:1;width:' + src.offsetWidth + 'px;margin:0;';
+                    clone.classList.remove('dragging');
+                    ghost.appendChild(clone);
+                }
+            });
+            document.body.appendChild(ghost);
+            e.dataTransfer.setDragImage(ghost, e.offsetX, 20);
+            setTimeout(() => ghost.remove(), 0);
         }
 
         function handleDragOver(e) {
@@ -1941,7 +1992,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         }
         
         function handleDragEnd(e) {
-            e.currentTarget.classList.remove('dragging');
+            document.querySelectorAll('.track-item.dragging').forEach(el => el.classList.remove('dragging'));
             clearDropIndicators();
             if (scrollInterval) { clearInterval(scrollInterval); scrollInterval = null; }
             draggedIndex = null;
