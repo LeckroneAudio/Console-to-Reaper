@@ -12,8 +12,8 @@ OPTIONS = {
         'CFBundleName': 'DiGiCo to Reaper',
         'CFBundleDisplayName': 'DiGiCo to Reaper',
         'CFBundleIdentifier': 'com.digico.reaper',
-        'CFBundleVersion': '2.0.0',
-        'CFBundleShortVersionString': '2.0.0',
+        'CFBundleVersion': '3.5.0',
+        'CFBundleShortVersionString': '3.5.0',
         'LSUIElement': False,  # Show in Dock
         'NSHighResolutionCapable': True,
     },
