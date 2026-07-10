@@ -412,6 +412,136 @@ def parse_dlive_show_file(file_content):
     return result
 
 
+def parse_m32_show_file(file_content):
+    """Parse a Behringer X32 / Midas M32 .scn scene file and extract channel sections.
+
+    The file is plain text with OSC-style paths.  Channel config lines follow the pattern:
+      /ch/01/config   "Name" icon COLOR channel_num   (32 input channels)
+      /auxin/01/config "Name" icon COLOR channel_num  (8 aux inputs)
+      /bus/01/config  "Name" icon COLOR               (16 mix buses)
+      /mtx/01/config  "Name" icon COLOR               (6 matrix outputs)
+    """
+    if isinstance(file_content, bytes):
+        file_content = file_content.decode('utf-8', errors='ignore')
+
+    result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+    pattern = re.compile(r'^/(ch|auxin|bus|mtx)/(\d+)/config\s+"([^"]*)"')
+
+    for line in file_content.splitlines():
+        m = pattern.match(line)
+        if not m:
+            continue
+        section, num_str, name = m.group(1), m.group(2), m.group(3)
+        num = int(num_str)
+
+        if section == 'ch':
+            name = name if name else f'Ch {num:02d}'
+            result['inputs'].append({'number': str(num), 'name': name, 'type': 'inputs', 'color': None})
+        elif section == 'auxin':
+            name = name if name else f'Aux In {num}'
+            result['inputs'].append({'number': f'AUX{num}', 'name': name, 'type': 'inputs', 'color': None})
+        elif section == 'bus':
+            name = name if name else f'Bus {num:02d}'
+            result['aux'].append({'number': f'BUS{num}', 'name': name, 'type': 'aux', 'color': None})
+        elif section == 'mtx':
+            name = name if name else f'Mtx {num}'
+            result['matrix'].append({'number': f'MTX{num}', 'name': name, 'type': 'matrix', 'color': None})
+
+    print(f"\n=== M32/X32 PARSE SUMMARY ===")
+    print(f"Inputs: {len(result['inputs'])}")
+    print(f"Aux (Buses): {len(result['aux'])}")
+    print(f"Matrix: {len(result['matrix'])}")
+
+    return result
+
+
+def parse_wing_show_file(file_content):
+    """Parse a Behringer Wing .snap (or .show) file and extract channel sections.
+
+    Channel names are stored on the input source (ae_data.io.in[grp][n].name).
+    Each channel strip (ae_data.ch) and aux strip (ae_data.aux) has its own name
+    (often empty) plus a conn pointer {grp, in} that resolves to the input source.
+    We prefer the strip name when set, otherwise fall back to the source name.
+
+      ae_data.ch   — 40 input channel strips → inputs
+      ae_data.aux  — 8 aux input strips      → inputs
+      ae_data.bus  — 16 mix buses            → aux
+      ae_data.main — main L/R/sub/fill       → groups
+      ae_data.mtx  — 8 matrix outputs        → matrix
+    """
+    if isinstance(file_content, bytes):
+        file_content = file_content.decode('utf-8', errors='ignore')
+
+    try:
+        data = json.loads(file_content)
+    except Exception:
+        return {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    ae = data.get('ae_data') or data
+    result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    # Build a flat lookup of all input source names: (grp, num_str) → name
+    io_in = ae.get('io', {}).get('in', {})
+    source_names = {}
+    for grp, entries in io_in.items():
+        if isinstance(entries, dict):
+            for num_str, v in entries.items():
+                if isinstance(v, dict):
+                    source_names[(grp, num_str)] = v.get('name', '').strip()
+
+    def resolve_name(strip, default_label, num):
+        name = strip.get('name', '').strip()
+        if not name:
+            conn = strip.get('in', {}).get('conn', {})
+            grp = conn.get('grp', '')
+            src_in = str(conn.get('in', ''))
+            name = source_names.get((grp, src_in), '')
+        return name if name else f'{default_label} {num:02d}'
+
+    # 40 input channel strips
+    for k, v in sorted(ae.get('ch', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
+        if not isinstance(v, dict):
+            continue
+        num = int(k)
+        name = resolve_name(v, 'Ch', num)
+        result['inputs'].append({'number': str(num), 'name': name, 'type': 'inputs', 'color': None})
+
+    # 8 aux input strips
+    for k, v in sorted(ae.get('aux', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
+        if not isinstance(v, dict):
+            continue
+        num = int(k)
+        name = resolve_name(v, 'Aux', num)
+        result['inputs'].append({'number': f'AUX{num}', 'name': name, 'type': 'inputs', 'color': None})
+
+    # Mix buses, mains, matrix
+    for k, v in sorted(ae.get('bus', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
+        if isinstance(v, dict):
+            num = int(k)
+            name = v.get('name', '').strip() or f'Bus {num:02d}'
+            result['aux'].append({'number': f'BUS{num}', 'name': name, 'type': 'aux', 'color': None})
+
+    for k, v in sorted(ae.get('main', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
+        if isinstance(v, dict):
+            num = int(k)
+            name = v.get('name', '').strip() or f'Main {num}'
+            result['groups'].append({'number': f'MAIN{num}', 'name': name, 'type': 'groups', 'color': None})
+
+    for k, v in sorted(ae.get('mtx', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
+        if isinstance(v, dict):
+            num = int(k)
+            name = v.get('name', '').strip() or f'Mtx {num:02d}'
+            result['matrix'].append({'number': f'MTX{num}', 'name': name, 'type': 'matrix', 'color': None})
+
+    print(f"\n=== WING PARSE SUMMARY ===")
+    print(f"Inputs (ch+aux): {len(result['inputs'])}")
+    print(f"Bus (Aux): {len(result['aux'])}")
+    print(f"Main (Groups): {len(result['groups'])}")
+    print(f"Matrix: {len(result['matrix'])}")
+
+    return result
+
+
 def hex_to_reaper_color(hex_color):
     """Convert #RRGGBB to REAPER PEAKCOL integer (R|G<<8|B<<16)|0x1000000"""
     hex_color = hex_color.lstrip('#')
@@ -1153,15 +1283,15 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div class="tab-bar" id="tabBar"></div>
 
         <h1>Console to Reaper Converter</h1>
-        <p class="subtitle">Convert DiGiCo, Yamaha Rivage, or Allen &amp; Heath dLive show files to Reaper track templates</p>
+        <p class="subtitle">Convert DiGiCo, Yamaha Rivage, A&amp;H dLive, Behringer X32/M32, or Behringer Wing show files to Reaper track templates</p>
 
         <div id="uploadArea" class="upload-area" onclick="document.getElementById('fileInput').click()">
             <div class="upload-icon">📄</div>
             <div class="upload-text">Drop your show file here</div>
-            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive (.tar.gz)</div>
+            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive (.tar.gz) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap)</div>
         </div>
 
-        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,application/gzip,application/x-gzip,application/x-tar" onchange="handleFile(this.files[0])">
+        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
         
         <div id="message" class="message"></div>
         
@@ -1274,6 +1404,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 <li><strong>DiGiCo:</strong> Export session report from the console (.rtf file)</li>
                 <li><strong>Yamaha Rivage PM:</strong> Copy the .RIVAGEPM show file from the console or Rivage PM Editor</li>
                 <li><strong>Allen &amp; Heath dLive:</strong> Export the show file from dLive Director (.tar.gz)</li>
+                <li><strong>Behringer X32 / Midas M32:</strong> Save a scene from the console or X32-Edit/M32-Edit (.scn)</li>
+                <li><strong>Behringer Wing:</strong> Save a snapshot from the console or Wing-Edit (.snap)</li>
                 <li>Upload or drag the file here</li>
                 <li>Select/deselect channels you want to import</li>
                 <li>Download the .RTrackTemplate file</li>
@@ -1587,10 +1719,10 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             uploadArea.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             const name = file ? file.name.toLowerCase() : '';
-            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz'))) {
+            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap'))) {
                 handleFile(file);
             } else {
-                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), or .tar.gz (A&H dLive) file', 'error');
+                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive), .scn (X32/M32), or .snap (Wing) file', 'error');
             }
         });
         
@@ -1631,7 +1763,13 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
 
                     const total = data.counts.inputs + data.counts.aux + data.counts.groups + data.counts.matrix;
                     if (total === 0) {
-                        showMessage('✗ "' + file.name + '" — No Channels Found, Please ensure Include: Channels is selected when saving the Session Report.', 'error');
+                        const ext = name.split('.').pop().toLowerCase();
+                        const hint = (ext === 'rtf')
+                            ? ' Please ensure Include: Channels is selected when saving the Session Report.'
+                            : (ext === 'show')
+                            ? ' If using a Wing show file, make sure at least one snapshot has been saved into it.'
+                            : '';
+                        showMessage('✗ "' + file.name + '" — No Channels Found.' + hint, 'error');
                     } else {
                         showMessage(`✓ "${file.name}" — ${total} total channels (${data.counts.inputs} inputs, ${data.counts.aux} aux, ${data.counts.groups} groups, ${data.counts.matrix} matrix)`, 'success');
                     }
@@ -2529,6 +2667,10 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 parsed_data = parse_rivage_pm_show_file(file_content)
             elif filename.endswith('.tar.gz'):
                 parsed_data = parse_dlive_show_file(file_content)
+            elif filename.endswith('.scn'):
+                parsed_data = parse_m32_show_file(file_content)
+            elif filename.endswith('.snap'):
+                parsed_data = parse_wing_show_file(file_content)
             else:
                 parsed_data = parse_digico_rtf(file_content)
             
