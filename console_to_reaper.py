@@ -623,11 +623,11 @@ def parse_dm7_show_file(file_content):
     The first block whose schema header contains 'Mixing' stores the mixing
     state, including channel names packed as fixed-width records.
 
-    Record layouts (offsets from the per-record anchor byte):
-      Input channels  — anchor: b'STEREO\\x00\\x00' (8 bytes), name at +8
-                        stride: 1777 bytes; count from COL0InputChannel header
-      Mix buses       — anchor: b'VARI' (4 bytes), name at +11
-                        stride: 647 bytes; ends when anchor changes
+    Record layouts (all counts and strides are read from COL0 schema headers):
+      Input channels (COL0InputChannel) — anchor b'STEREO\\x00\\x00', name at +8
+      Mix buses      (COL0Mix)          — anchor b'VARI', name at +11
+      Matrix outputs (COL0Matrix)       — 3-zero prefix, name at +3
+      Stereo buses   (COL0Stereo)       — 0x02 prefix, name at +1 (deduplicated)
     """
     if isinstance(file_content, str):
         file_content = file_content.encode('latin-1')
@@ -694,14 +694,64 @@ def parse_dm7_show_file(file_content):
         if not name:
             name = f'MX{aux_num + 1:02d}'
         aux_num += 1
-        result['aux'].append({'number': f'BUS{aux_num}s', 'name': name, 'type': 'aux', 'color': None})
+        result['aux'].append({'number': f'BUS{aux_num}', 'name': name, 'type': 'aux', 'color': None})
         vari_off += VARI_STRIDE
         if mixing_data[vari_off:vari_off + 4] != b'VARI':
             break
+    # vari_off now points to the first byte after the VARI block
+    vari_block_end = vari_off
+
+    # ── Matrix outputs (3-zero prefix records) ───────────────────────────────
+    col0_mtx = mixing_data.find(b'COL0Matrix')
+    if col0_mtx >= 0:
+        mtx_stride = struct.unpack_from('<I', mixing_data, col0_mtx + 40)[0]
+        mtx_count  = struct.unpack_from('<I', mixing_data, col0_mtx + 44)[0]
+
+        # Matrix block follows immediately after VARI block
+        mtx_start = vari_block_end
+        mtx_num = 0
+        for i in range(mtx_count):
+            rec_start = mtx_start + i * mtx_stride
+            name_off  = rec_start + 3
+            if name_off + 64 > len(mixing_data):
+                break
+            if mixing_data[rec_start:rec_start + 3] != b'\x00\x00\x00':
+                break
+            name = mixing_data[name_off:name_off + 64].rstrip(b'\x00').decode('ascii', errors='replace').strip()
+            if not name:
+                name = f'MT{mtx_num + 1:02d}'
+            mtx_num += 1
+            result['matrix'].append({'number': f'MTX{mtx_num}', 'name': name, 'type': 'matrix', 'color': None})
+
+    # ── Stereo buses (0x02-prefix records, deduplicated) ─────────────────────
+    col0_st = mixing_data.find(b'COL0Stereo')
+    if col0_st >= 0:
+        st_stride = struct.unpack_from('<I', mixing_data, col0_st + 40)[0]
+        st_count  = struct.unpack_from('<I', mixing_data, col0_st + 44)[0]
+
+        # Stereo block follows immediately after matrix block
+        st_start = mtx_start + mtx_num * mtx_stride if col0_mtx >= 0 else vari_block_end
+        seen_st  = set()
+        grp_num  = 0
+        for i in range(st_count):
+            rec_start = st_start + i * st_stride
+            name_off  = rec_start + 1
+            if name_off + 64 > len(mixing_data):
+                break
+            if mixing_data[rec_start:rec_start + 1] != b'\x02':
+                break
+            name = mixing_data[name_off:name_off + 64].rstrip(b'\x00').decode('ascii', errors='replace').strip()
+            if not name or name in seen_st:
+                continue
+            seen_st.add(name)
+            grp_num += 1
+            result['groups'].append({'number': f'ST{grp_num}s', 'name': name, 'type': 'groups', 'color': None})
 
     print(f"\n=== DM7 PARSE SUMMARY ===")
     print(f"Inputs: {len(result['inputs'])}")
     print(f"Mix buses (Aux): {len(result['aux'])}")
+    print(f"Matrix: {len(result['matrix'])}")
+    print(f"Stereo buses (Groups): {len(result['groups'])}")
 
     return result
 
