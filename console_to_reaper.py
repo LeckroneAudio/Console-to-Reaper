@@ -615,6 +615,97 @@ def parse_wing_show_file(file_content):
     return result
 
 
+def parse_dm7_show_file(file_content):
+    """Parse a Yamaha DM7 .dm7f project file and extract channel sections.
+
+    The file is a binary MBDF (Multi-Band Data Format) container.  It holds
+    multiple zlib-compressed blocks, each starting with '#YAMAHA MBDFBackup'.
+    The first block whose schema header contains 'Mixing' stores the mixing
+    state, including channel names packed as fixed-width records.
+
+    Record layouts (offsets from the per-record anchor byte):
+      Input channels  — anchor: b'STEREO\\x00\\x00' (8 bytes), name at +8
+                        stride: 1777 bytes; count from COL0InputChannel header
+      Mix buses       — anchor: b'VARI' (4 bytes), name at +11
+                        stride: 647 bytes; ends when anchor changes
+    """
+    if isinstance(file_content, str):
+        file_content = file_content.encode('latin-1')
+
+    result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    # ── Find the Mixing MBDFBackup block ──────────────────────────────────────
+    mixing_data = None
+    for i in range(len(file_content) - 1):
+        b0, b1 = file_content[i], file_content[i + 1]
+        if b0 == 0x78 and b1 in (0x01, 0x9C, 0xDA):
+            try:
+                dec = zlib.decompress(file_content[i:])
+                # Mixing block has '#MMS FIELD\x00\x00Mixing' at offset 72
+                if dec[72:90] == b'#MMS FIELD\x00\x00Mixing' and b'COL0InputChannel' in dec[:600]:
+                    mixing_data = dec
+                    break
+            except Exception:
+                pass
+
+    if mixing_data is None:
+        return result
+
+    # ── Input channels (STEREO records) ───────────────────────────────────────
+    col0_pos = mixing_data.find(b'COL0InputChannel')
+    if col0_pos < 0:
+        return result
+
+    inp_record_size = struct.unpack_from('<I', mixing_data, col0_pos + 40)[0]
+    inp_count       = struct.unpack_from('<I', mixing_data, col0_pos + 44)[0]
+
+    stereo_off = mixing_data.find(b'STEREO\x00\x00')
+    if stereo_off < 0 or inp_record_size == 0:
+        return result
+
+    inp_num = 0
+    for i in range(inp_count):
+        name_off = stereo_off + 8 + i * inp_record_size
+        if name_off + 64 > len(mixing_data):
+            break
+        if mixing_data[name_off - 8:name_off] != b'STEREO\x00\x00':
+            break
+        name = mixing_data[name_off:name_off + 64].rstrip(b'\x00').decode('ascii', errors='replace').strip()
+        if not name:
+            name = f'Ch {inp_num + 1:02d}'
+        inp_num += 1
+        result['inputs'].append({'number': str(inp_num), 'name': name, 'type': 'inputs', 'color': None})
+
+    # ── Mix buses (VARI records) ───────────────────────────────────────────────
+    VARI_STRIDE   = 647
+    VARI_NAME_OFF = 11
+    # STEREO records start 10 bytes before the STEREO marker; account for that
+    # offset when computing where the block ends before the VARI section begins.
+    stereo_block_start = stereo_off - 10
+    vari_search_start = stereo_block_start + inp_count * inp_record_size
+    vari_off = mixing_data.find(b'VARI', vari_search_start)
+
+    aux_num = 0
+    while vari_off >= 0 and vari_off + VARI_NAME_OFF + 64 <= len(mixing_data):
+        if mixing_data[vari_off:vari_off + 4] != b'VARI':
+            break
+        name_off = vari_off + VARI_NAME_OFF
+        name = mixing_data[name_off:name_off + 64].rstrip(b'\x00').decode('ascii', errors='replace').strip()
+        if not name:
+            name = f'MX{aux_num + 1:02d}'
+        aux_num += 1
+        result['aux'].append({'number': f'BUS{aux_num}s', 'name': name, 'type': 'aux', 'color': None})
+        vari_off += VARI_STRIDE
+        if mixing_data[vari_off:vari_off + 4] != b'VARI':
+            break
+
+    print(f"\n=== DM7 PARSE SUMMARY ===")
+    print(f"Inputs: {len(result['inputs'])}")
+    print(f"Mix buses (Aux): {len(result['aux'])}")
+
+    return result
+
+
 def hex_to_reaper_color(hex_color):
     """Convert #RRGGBB to REAPER PEAKCOL integer (R|G<<8|B<<16)|0x1000000"""
     hex_color = hex_color.lstrip('#')
@@ -1385,10 +1476,10 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div id="uploadArea" class="upload-area" onclick="document.getElementById('fileInput').click()">
             <div class="upload-icon">📄</div>
             <div class="upload-text">Drop your show file here</div>
-            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive (.tar.gz) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh)</div>
+            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive (.tar.gz) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f)</div>
         </div>
 
-        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
+        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
         
         <div id="message" class="message"></div>
         
@@ -1504,6 +1595,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 <li><strong>Behringer X32 / Midas M32:</strong> Save a scene from the console or X32-Edit/M32-Edit (.scn)</li>
                 <li><strong>Behringer Wing:</strong> Save a snapshot from the console or Wing-Edit (.snap)</li>
                 <li><strong>Avid S6L / VENUE:</strong> Save a show file from the console or VENUE software (.dsh)</li>
+                <li><strong>Yamaha DM7:</strong> Copy the .dm7f project file from the DM7 or DM7 Compact (.dm7f)</li>
                 <li>Upload or drag the file here</li>
                 <li>Select/deselect channels you want to import</li>
                 <li>Download the .RTrackTemplate file</li>
@@ -1817,10 +1909,10 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             uploadArea.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             const name = file ? file.name.toLowerCase() : '';
-            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh'))) {
+            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f'))) {
                 handleFile(file);
             } else {
-                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive), .scn (X32/M32), .snap (Wing), or .dsh (Avid S6L) file', 'error');
+                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), or .dm7f (Yamaha DM7) file', 'error');
             }
         });
         
@@ -2794,6 +2886,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 parsed_data = parse_wing_show_file(file_content)
             elif filename.endswith('.dsh'):
                 parsed_data = parse_s6l_show_file(file_content)
+            elif filename.endswith('.dm7f'):
+                parsed_data = parse_dm7_show_file(file_content)
             else:
                 parsed_data = parse_digico_rtf(file_content)
             
