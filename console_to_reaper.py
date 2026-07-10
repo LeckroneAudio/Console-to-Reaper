@@ -301,6 +301,7 @@ def parse_dlive_show_file(file_content):
     # SECTION_MAP controls which sections we actually extract.
     ALL_SECTIONS = [
         b'#Input Channel Name Colour Manager',
+        b'Input Channel Name Colour Manager',   # Avantis (no # prefix)
         b'Mono Group Channel Name Colour Manager',
         b'Stereo Group Channel Name Colour Manager',
         b'Mono Aux Channel Name Colour Manager',
@@ -318,6 +319,7 @@ def parse_dlive_show_file(file_content):
     ]
     SECTION_MAP = {
         b'#Input Channel Name Colour Manager':        'inputs',
+        b'Input Channel Name Colour Manager':         'inputs',   # Avantis
         b'Mono Group Channel Name Colour Manager':    'groups',
         b'Stereo Group Channel Name Colour Manager':  'groups',
         b'Mono Aux Channel Name Colour Manager':      'aux',
