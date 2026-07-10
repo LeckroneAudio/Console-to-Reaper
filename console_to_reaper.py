@@ -455,6 +455,59 @@ def parse_m32_show_file(file_content):
     return result
 
 
+def parse_s6l_show_file(file_content):
+    """Parse an Avid S6L / VENUE .dsh show file and extract channel sections.
+
+    The file uses Digidesign Storage binary format.  Each strip is stored as:
+      \nStrip\x00\x0d + 5 bytes + name (null-terminated)
+    The strip type (input vs bus) is determined by the nearest preceding marker:
+      \nInputStrip\x00       → input channel
+      \nAudioMasterStrip\x00 / \nBusMasterStrip\x00 → bus / aux
+    Only the first snapshot is parsed (duplicates signal a new snapshot).
+    """
+    if isinstance(file_content, str):
+        file_content = file_content.encode('latin-1')
+
+    result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+    strip_name_pat = re.compile(rb'\nStrip\x00\x0d.{5}([\x20-\x7e]+)\x00')
+    seen_inputs = set()
+    seen_buses = set()
+    inp_num = aux_num = 0
+
+    for m in strip_name_pat.finditer(file_content):
+        name = m.group(1).decode('ascii', errors='replace').strip()
+        if not name:
+            continue
+
+        pos = m.start()
+        chunk = file_content[max(0, pos - 2000):pos]
+        inp_dist = len(chunk) - chunk.rfind(b'\nInputStrip\x00')
+        bus_dist = len(chunk) - max(
+            chunk.rfind(b'\nAudioMasterStrip\x00'),
+            chunk.rfind(b'\nBusMasterStrip\x00')
+        )
+        is_input = inp_dist < bus_dist
+
+        if is_input:
+            if name in seen_inputs:
+                break  # repeated input name = second snapshot, stop
+            seen_inputs.add(name)
+            inp_num += 1
+            result['inputs'].append({'number': str(inp_num), 'name': name, 'type': 'inputs', 'color': None})
+        else:
+            if name in seen_buses:
+                continue  # skip duplicate bus names
+            seen_buses.add(name)
+            aux_num += 1
+            result['aux'].append({'number': f'BUS{aux_num}s', 'name': name, 'type': 'aux', 'color': None})
+
+    print(f"\n=== S6L PARSE SUMMARY ===")
+    print(f"Inputs: {len(result['inputs'])}")
+    print(f"Aux/Bus: {len(result['aux'])}")
+
+    return result
+
+
 def parse_wing_show_file(file_content):
     """Parse a Behringer Wing .snap (or .show) file and extract channel sections.
 
@@ -480,14 +533,16 @@ def parse_wing_show_file(file_content):
     ae = data.get('ae_data') or data
     result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
 
-    # Build a flat lookup of all input source names: (grp, num_str) → name
+    # Build lookups for input source names and modes: (grp, num_str) → name / mode
     io_in = ae.get('io', {}).get('in', {})
     source_names = {}
+    source_modes = {}
     for grp, entries in io_in.items():
         if isinstance(entries, dict):
             for num_str, v in entries.items():
                 if isinstance(v, dict):
                     source_names[(grp, num_str)] = v.get('name', '').strip()
+                    source_modes[(grp, num_str)] = v.get('mode', 'M')
 
     def resolve_name(strip, default_label, num):
         name = strip.get('name', '').strip()
@@ -498,13 +553,27 @@ def parse_wing_show_file(file_content):
             name = source_names.get((grp, src_in), '')
         return name if name else f'{default_label} {num:02d}'
 
-    # 40 input channel strips
+    def get_src_mode(strip):
+        conn = strip.get('in', {}).get('conn', {})
+        return source_modes.get((conn.get('grp', ''), str(conn.get('in', ''))), 'M')
+
+    # 40 input channel strips — stereo pairs share the same source name with mode='ST'
+    last_stereo_name = None
     for k, v in sorted(ae.get('ch', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
         if not isinstance(v, dict):
             continue
         num = int(k)
         name = resolve_name(v, 'Ch', num)
-        result['inputs'].append({'number': str(num), 'name': name, 'type': 'inputs', 'color': None})
+        src_mode = get_src_mode(v)
+        if src_mode == 'ST':
+            if name == last_stereo_name:
+                last_stereo_name = None
+                continue  # R side of stereo pair already added
+            last_stereo_name = name
+            result['inputs'].append({'number': f'{num}s', 'name': name, 'type': 'inputs', 'color': None})
+        else:
+            last_stereo_name = None
+            result['inputs'].append({'number': str(num), 'name': name, 'type': 'inputs', 'color': None})
 
     # 8 aux input strips
     for k, v in sorted(ae.get('aux', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
@@ -519,7 +588,9 @@ def parse_wing_show_file(file_content):
         if isinstance(v, dict):
             num = int(k)
             name = v.get('name', '').strip() or f'Bus {num:02d}'
-            result['aux'].append({'number': f'BUS{num}', 'name': name, 'type': 'aux', 'color': None})
+            is_stereo = not v.get('busmono', True)
+            number = f'BUS{num}s' if is_stereo else f'BUS{num}'
+            result['aux'].append({'number': number, 'name': name, 'type': 'aux', 'color': None})
 
     for k, v in sorted(ae.get('main', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
         if isinstance(v, dict):
@@ -1160,6 +1231,30 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             color: #007aff;
             background: #e6f2ff;
         }
+        .stereo-btn {
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 10px;
+            border: 1px solid #ccc;
+            cursor: pointer;
+            background: #f0f0f0;
+            color: #888;
+            flex-shrink: 0;
+            transition: background 0.15s, color 0.15s, border-color 0.15s;
+            line-height: 1.4;
+        }
+        .stereo-btn.is-stereo {
+            background: #e3f0ff;
+            color: #1a6fc4;
+            border-color: #90c0f0;
+        }
+        .stereo-btn:hover {
+            border-color: #1a6fc4;
+            color: #1a6fc4;
+        }
+        body.dark .stereo-btn { background: #333; color: #666; border-color: #444; }
+        body.dark .stereo-btn.is-stereo { background: #1a2d42; color: #5ba3f5; border-color: #2a5080; }
         .track-name {
             color: #1d1d1f;
             flex: 1;
@@ -1288,10 +1383,10 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div id="uploadArea" class="upload-area" onclick="document.getElementById('fileInput').click()">
             <div class="upload-icon">📄</div>
             <div class="upload-text">Drop your show file here</div>
-            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive (.tar.gz) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap)</div>
+            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive (.tar.gz) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh)</div>
         </div>
 
-        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
+        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
         
         <div id="message" class="message"></div>
         
@@ -1406,6 +1501,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 <li><strong>Allen &amp; Heath dLive:</strong> Export the show file from dLive Director (.tar.gz)</li>
                 <li><strong>Behringer X32 / Midas M32:</strong> Save a scene from the console or X32-Edit/M32-Edit (.scn)</li>
                 <li><strong>Behringer Wing:</strong> Save a snapshot from the console or Wing-Edit (.snap)</li>
+                <li><strong>Avid S6L / VENUE:</strong> Save a show file from the console or VENUE software (.dsh)</li>
                 <li>Upload or drag the file here</li>
                 <li>Select/deselect channels you want to import</li>
                 <li>Download the .RTrackTemplate file</li>
@@ -1719,10 +1815,10 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             uploadArea.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             const name = file ? file.name.toLowerCase() : '';
-            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap'))) {
+            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh'))) {
                 handleFile(file);
             } else {
-                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive), .scn (X32/M32), or .snap (Wing) file', 'error');
+                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive), .scn (X32/M32), .snap (Wing), or .dsh (Avid S6L) file', 'error');
             }
         });
         
@@ -1962,10 +2058,33 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 editBtn.title = 'Rename channel';
                 editBtn.onclick = (e) => { e.stopPropagation(); startEditName(idx, name, ch); };
 
+                // Stereo toggle button
+                const stereoBtn = document.createElement('button');
+                const isStereo = ch.number.endsWith('s');
+                stereoBtn.className = 'stereo-btn' + (isStereo ? ' is-stereo' : '');
+                stereoBtn.textContent = isStereo ? 'Stereo' : 'Mono';
+                stereoBtn.title = isStereo ? 'Click to set mono' : 'Click to set stereo';
+                stereoBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const targets = (activeChannels.has(idx) && activeChannels.size > 1)
+                        ? Array.from(activeChannels) : [idx];
+                    saveUndo();
+                    targets.forEach(i => {
+                        const c = currentCombinedChannels[i];
+                        if (c.number.endsWith('s')) {
+                            c.number = c.number.slice(0, -1);
+                        } else {
+                            c.number = c.number + 's';
+                        }
+                    });
+                    showPreview(currentCombinedChannels);
+                };
+
                 div.appendChild(dragHandle);
                 div.appendChild(checkbox);
                 div.appendChild(number);
                 div.appendChild(badge);
+                div.appendChild(stereoBtn);
                 div.appendChild(colorBtn);
                 div.appendChild(name);
                 div.appendChild(editBtn);
@@ -2671,6 +2790,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 parsed_data = parse_m32_show_file(file_content)
             elif filename.endswith('.snap'):
                 parsed_data = parse_wing_show_file(file_content)
+            elif filename.endswith('.dsh'):
+                parsed_data = parse_s6l_show_file(file_content)
             else:
                 parsed_data = parse_digico_rtf(file_content)
             
