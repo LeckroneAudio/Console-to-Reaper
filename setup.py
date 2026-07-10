@@ -1,17 +1,17 @@
 """
-Setup script for DiGiCo to Reaper Converter
+Setup script for Console to Reaper Converter
 """
 from setuptools import setup
 
-APP = ['digico_to_reaper.py']
+APP = ['console_to_reaper.py']
 DATA_FILES = []
 OPTIONS = {
     'argv_emulation': False,
     'packages': ['rumps'],
     'plist': {
-        'CFBundleName': 'DiGiCo to Reaper',
-        'CFBundleDisplayName': 'DiGiCo to Reaper',
-        'CFBundleIdentifier': 'com.digico.reaper',
+        'CFBundleName': 'Console to Reaper',
+        'CFBundleDisplayName': 'Console to Reaper',
+        'CFBundleIdentifier': 'com.leckroneaudio.consoletoreaper',
         'CFBundleVersion': '3.5.0',
         'CFBundleShortVersionString': '3.5.0',
         'LSUIElement': False,  # Show in Dock
@@ -20,7 +20,7 @@ OPTIONS = {
 }
 
 setup(
-    name='DiGiCo to Reaper',
+    name='Console to Reaper',
     app=APP,
     data_files=DATA_FILES,
     options={'py2app': OPTIONS},

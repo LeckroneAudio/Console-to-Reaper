@@ -1,6 +1,6 @@
 -- Behringer Wing to Reaper — Input Channel Importer
 -- Parses a Wing .snap snapshot file and creates tracks for all Input Channels.
--- Requires Python 3 (comes with the DiGiCo to Reaper app).
+-- Requires Python 3 (comes with the Console to Reaper app).
 --
 -- Installation:
 --   1. Actions > Load ReaScript, select this file

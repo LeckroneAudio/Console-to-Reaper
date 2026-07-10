@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-DiGiCo to Reaper Track Template Converter
-Parses DiGiCo session reports and generates Reaper track templates
+Console to Reaper Track Template Converter
+Parses show files from multiple consoles and generates Reaper track templates
 """
 
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -657,7 +657,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
 <!DOCTYPE html>
 <html>
 <head>
-    <title>DiGiCo to Reaper Converter</title>
+    <title>Console to Reaper</title>
     <meta charset="UTF-8">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1468,7 +1468,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div style="background: white; padding: 40px; border-radius: 12px; text-align: center; max-width: 400px;">
             <div style="font-size: 48px; margin-bottom: 20px;">⚠️</div>
             <h2 style="margin-bottom: 10px; color: #1d1d1f;">Server Disconnected</h2>
-            <p style="color: #86868b; margin-bottom: 20px;">The DiGiCo to Reaper converter has been closed.</p>
+            <p style="color: #86868b; margin-bottom: 20px;">The Console to Reaper converter has been closed.</p>
             <p style="color: #86868b; font-size: 14px;">You can close this tab or restart the app to continue.</p>
         </div>
     </div>
@@ -2722,9 +2722,9 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode())
 
 
-class DiGiCoConverterApp(rumps.App):
+class ConsoleToReaperApp(rumps.App):
     def __init__(self):
-        super(DiGiCoConverterApp, self).__init__("🎛️", quit_button=None)
+        super(ConsoleToReaperApp, self).__init__("🎛️", quit_button=None)
         self.server = None
         self.server_thread = None
         self.port = None
@@ -2747,7 +2747,7 @@ class DiGiCoConverterApp(rumps.App):
         
         if self.port is None:
             rumps.alert(
-                title="DiGiCo to Reaper",
+                title="Console to Reaper",
                 message="Could not find an available port (8081-8090 all in use).\n\nPlease close other applications and try again.",
                 ok="Quit"
             )
@@ -2804,4 +2804,4 @@ class DiGiCoConverterApp(rumps.App):
 
 
 if __name__ == "__main__":
-    DiGiCoConverterApp().run()
+    ConsoleToReaperApp().run()

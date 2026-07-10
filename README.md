@@ -1,8 +1,8 @@
-DiGiCo to Reaper Converter v3.5
-================================
+Console to Reaper v3.5
+======================
 
 INSTALLATION:
-1. Drag "DiGiCo to Reaper.app" to your Applications folder
+1. Drag "Console to Reaper.app" to your Applications folder
 2. Double-click to launch
 3. Look for the 🎛️ icon in your menu bar (top-right of screen)
 
@@ -143,3 +143,4 @@ CHANNEL TYPES:
 Built by: Michael Leckrone
 Contact: leckroneaudio@gmail.com
 Version: 3.5
+GitHub: github.com/LeckroneAudio/Console-to-Reaper
