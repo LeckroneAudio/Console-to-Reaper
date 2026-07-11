@@ -266,16 +266,29 @@ def parse_dlive_show_file(file_content):
         return {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
 
     scene_gz = None
+    input_config_raw = None
     for member in outer.getmembers():
         if 'StageBoxScene65535' in member.name and member.name.endswith('.tar.gz'):
             f = outer.extractfile(member)
             if f:
                 scene_gz = f.read()
-            break
+        elif member.name.endswith('InputConfig/InputConfig.dat'):
+            f = outer.extractfile(member)
+            if f:
+                input_config_raw = f.read()
     outer.close()
 
     if scene_gz is None:
         return {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    # Parse stereo pair assignments from InputConfig.dat.
+    # Format: line 0 = version, lines 1–N = one entry per pair ("1"=stereo, "0"=mono).
+    avantis_stereo_pairs: set[int] = set()
+    if input_config_raw:
+        lines = input_config_raw.decode('utf-8', errors='ignore').strip().split('\n')
+        for pair_idx, line in enumerate(lines[1:]):
+            if line.strip() == '1':
+                avantis_stereo_pairs.add(pair_idx)
 
     # ── 2. Open inner .tar.gz and extract the .dat file ───────────────────
     try:
@@ -328,7 +341,6 @@ def parse_dlive_show_file(file_content):
         b'Mono Matrix Channel Name Colour Manager':   'matrix',
         b'Stereo Matrix Channel Name Colour Manager': 'matrix',
         b'Monitor Channel Name Colour Manager':       'aux',
-        b'DCA Channel Name Colour Manager':           'groups',
     }
 
     # Build sorted list of (name_pos, data_start, section_name) for every section found
@@ -344,11 +356,13 @@ def parse_dlive_show_file(file_content):
         b'Stereo Group Channel Name Colour Manager',
         b'Stereo Aux Channel Name Colour Manager',
         b'Stereo Matrix Channel Name Colour Manager',
+        b'Main Channel Name Colour Manager',
     }
 
     # Label used when a channel has only a numeric default name (e.g. "1", "32")
     DEFAULT_LABEL = {
         b'#Input Channel Name Colour Manager':        'Input',
+        b'Input Channel Name Colour Manager':         'Input',   # Avantis
         b'Mono Group Channel Name Colour Manager':    'Mono Grp',
         b'Stereo Group Channel Name Colour Manager':  'Stereo Grp',
         b'Mono Aux Channel Name Colour Manager':      'Mono Aux',
@@ -375,31 +389,60 @@ def parse_dlive_show_file(file_content):
         default_label = DEFAULT_LABEL.get(section_name, '')
         section_idx = 0
 
+        # Collect raw names for this section first (needed for stereo pair look-ahead)
+        raw_names = []
         for i in range(count):
             rec = dat[data_start + i * 9: data_start + i * 9 + 9]
             if len(rec) < 9:
                 break
             name_bytes = rec[1:9]
             null = name_bytes.find(0)
-            raw_name = name_bytes[:null if null >= 0 else 8]
+            raw = name_bytes[:null if null >= 0 else 8]
             try:
-                name = raw_name.decode('ascii').strip()
+                raw_str = raw.decode('ascii').strip()
             except UnicodeDecodeError:
-                break  # non-ASCII = past end of section
-            if not name or not name.isprintable():
-                break  # padding or control bytes = past end of section
+                break
+            if not raw_str or not raw_str.isprintable():
+                break
+            raw_names.append(raw_str)
+
+        # Detect stereo input pairs on Avantis (no # prefix) using InputConfig.dat.
+        # Falls back to name heuristics if InputConfig.dat was not found in the archive.
+        skip_indices = set()
+        stereo_indices = set()
+        if category == 'inputs' and section_name == b'Input Channel Name Colour Manager':
+            if avantis_stereo_pairs:
+                for i in range(0, len(raw_names), 2):
+                    pair_idx = i // 2
+                    if pair_idx in avantis_stereo_pairs:
+                        stereo_indices.add(i)
+                        if i + 1 < len(raw_names):
+                            skip_indices.add(i + 1)
+            else:
+                for i in range(0, len(raw_names) - 1, 2):
+                    l_name = raw_names[i]
+                    r_name = raw_names[i + 1]
+                    r_ch_num = str(i + 2)
+                    if not l_name.isdigit() and (r_name == r_ch_num or '/' in l_name or r_name == l_name + ' R'):
+                        stereo_indices.add(i)
+                        skip_indices.add(i + 1)
+
+        for i, raw_name in enumerate(raw_names):
+            if i in skip_indices:
+                continue
 
             section_idx += 1
-            # Replace bare numeric default names with a descriptive label
+            name = raw_name
             if name.isdigit():
                 name = f'{default_label} {section_idx}'
 
             counters[category] += 1
             n = counters[category]
-            is_stereo = section_name in STEREO_SECTIONS
+            is_section_stereo = section_name in STEREO_SECTIONS
+            is_pair_stereo = i in stereo_indices
             if category == 'inputs':
-                number = str(n)
-            elif is_stereo:
+                number = f'{n}s' if is_pair_stereo else str(n)
+            elif is_section_stereo:
                 number = f'{prefix_map[category]}{n}s'
             else:
                 number = f'{prefix_map[category]}{n}'
@@ -612,6 +655,103 @@ def parse_wing_show_file(file_content):
     print(f"Main (Groups): {len(result['groups'])}")
     print(f"Matrix: {len(result['matrix'])}")
 
+    return result
+
+
+def parse_sq_show_file(file_content):
+    """Parse an Allen & Heath SQ scene .DAT file and extract channel sections.
+
+    SQ-MixPad saves scenes as 128 KB binary .DAT files (SCENE000.DAT, etc.).
+    Channel records are 336 bytes each starting at offset 880.
+    Each record: [4-byte header][8-byte null-padded name][324 bytes of data]
+
+    Confirmed channel layout (0-indexed record numbers):
+       0–39:  Mono inputs 1–40
+      40–47:  Stereo input pairs: even = L (keep), odd = R (skip)
+      72–79:  Group buses (8 stereo groups)
+      88–91:  Stereo aux sends (IEM-type)
+      92–95:  Mono aux sends (wedge-type)
+    108–110:  Stereo matrix outputs MTX 1–3 (names not stored; use defaults)
+    """
+    if isinstance(file_content, str):
+        file_content = file_content.encode('latin-1')
+
+    if len(file_content) != 131072 or file_content[:2] != b'\xa1\x00':
+        return {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    RECORD_OFFSET = 880
+    RECORD_STRIDE = 336
+
+    def read_name(rec_idx):
+        off = RECORD_OFFSET + rec_idx * RECORD_STRIDE + 4
+        raw = file_content[off:off + 8]
+        null = raw.find(0)
+        try:
+            return raw[:null if null >= 0 else 8].decode('ascii').strip()
+        except UnicodeDecodeError:
+            return ''
+
+    # Stereo flags: bitmask starting at file offset 80, indexed by internal bus ID.
+    # bus_id maps to byte (80 + bus_id // 8), bit (bus_id % 8). 1 = stereo, 0 = mono.
+    def is_stereo(bus_id):
+        byte_idx = 80 + bus_id // 8
+        bit = bus_id % 8
+        return bool((file_content[byte_idx] >> bit) & 1)
+
+    result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+    input_n = 0
+
+    for i in range(48):
+        in_stereo_zone = (i >= 40)
+        if in_stereo_zone and i % 2 == 1:
+            continue  # R side of stereo pair — skip
+        input_n += 1
+        name = read_name(i) or f'Input {input_n}'
+        number = f'{input_n}s' if in_stereo_zone else str(input_n)
+        result['inputs'].append({'number': number, 'name': name, 'type': 'inputs'})
+
+    # Groups: records 72-79, bus IDs 64-71
+    grp_n = 0
+    for i in range(72, 80):
+        name = read_name(i)
+        if not name:
+            continue  # unused group bus slot
+        grp_n += 1
+        stereo = is_stereo(64 + (i - 72))
+        number = f'GRP{grp_n}s' if stereo else f'GRP{grp_n}'
+        result['groups'].append({'number': number, 'name': name, 'type': 'groups'})
+
+    # Aux: records 88-95, bus IDs 80-87 (stereo IEM or mono wedge per bitmask)
+    aux_n = 0
+    for i in range(88, 96):
+        name = read_name(i)
+        if not name:
+            continue
+        aux_n += 1
+        stereo = is_stereo(80 + (i - 88))
+        number = f'AUX{aux_n}s' if stereo else f'AUX{aux_n}'
+        result['aux'].append({'number': number, 'name': name, 'type': 'aux'})
+
+    # Matrix: records 107-112, bus IDs 107-109.
+    # Each stereo pair (bus 107-109) has a secondary mono slot (records 110-112).
+    # When a pair is stereo → 1 channel; when mono → 2 channels (primary + secondary).
+    mtx_n = 0
+    for pair in range(3):
+        mtx_n += 1
+        stereo = is_stereo(107 + pair)
+        name = read_name(107 + pair) or f'MTX {mtx_n}'
+        number = f'MTX{mtx_n}s' if stereo else f'MTX{mtx_n}'
+        result['matrix'].append({'number': number, 'name': name, 'type': 'matrix'})
+    for pair in range(3):
+        if not is_stereo(107 + pair):
+            mtx_n += 1
+            name = read_name(110 + pair) or f'MTX {mtx_n}'
+            result['matrix'].append({'number': f'MTX{mtx_n}', 'name': name, 'type': 'matrix'})
+
+    print(f"\n=== SQ PARSE SUMMARY ===")
+    print(f"Inputs: {len(result['inputs'])}")
+    print(f"Aux: {len(result['aux'])}")
+    print(f"Groups: {len(result['groups'])}")
     return result
 
 
@@ -1521,15 +1661,15 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div class="tab-bar" id="tabBar"></div>
 
         <h1>Console to Reaper Converter</h1>
-        <p class="subtitle">Convert DiGiCo, Yamaha Rivage, A&amp;H dLive, Behringer X32/M32, or Behringer Wing show files to Reaper track templates</p>
+        <p class="subtitle">Convert DiGiCo, Yamaha Rivage, A&amp;H dLive/Avantis/SQ, Behringer X32/M32, or Behringer Wing show files to Reaper track templates</p>
 
         <div id="uploadArea" class="upload-area" onclick="document.getElementById('fileInput').click()">
             <div class="upload-icon">📄</div>
             <div class="upload-text">Drop your show file here</div>
-            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive (.tar.gz) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f)</div>
+            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f)</div>
         </div>
 
-        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
+        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
         
         <div id="message" class="message"></div>
         
@@ -1641,7 +1781,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             <ol>
                 <li><strong>DiGiCo:</strong> Export session report from the console (.rtf file)</li>
                 <li><strong>Yamaha Rivage PM:</strong> Copy the .RIVAGEPM show file from the console or Rivage PM Editor</li>
-                <li><strong>Allen &amp; Heath dLive:</strong> Export the show file from dLive Director (.tar.gz)</li>
+                <li><strong>Allen &amp; Heath dLive / Avantis:</strong> Export the show file from dLive Director or Avantis Director (.tar.gz)</li>
+                <li><strong>Allen &amp; Heath SQ:</strong> Export a scene from SQ-MixPad or save to USB from the console (.dat)</li>
                 <li><strong>Behringer X32 / Midas M32:</strong> Save a scene from the console or X32-Edit/M32-Edit (.scn)</li>
                 <li><strong>Behringer Wing:</strong> Save a snapshot from the console or Wing-Edit (.snap)</li>
                 <li><strong>Avid S6L / VENUE:</strong> Save a show file from the console or VENUE software (.dsh)</li>
@@ -1959,10 +2100,10 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             uploadArea.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             const name = file ? file.name.toLowerCase() : '';
-            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f'))) {
+            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f') || name.endsWith('.dat'))) {
                 handleFile(file);
             } else {
-                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), or .dm7f (Yamaha DM7) file', 'error');
+                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive/Avantis), .dat (A&H SQ), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), or .dm7f (Yamaha DM7) file', 'error');
             }
         });
         
@@ -2938,6 +3079,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 parsed_data = parse_s6l_show_file(file_content)
             elif filename.endswith('.dm7f'):
                 parsed_data = parse_dm7_show_file(file_content)
+            elif filename.lower().endswith('.dat'):
+                parsed_data = parse_sq_show_file(file_content)
             else:
                 parsed_data = parse_digico_rtf(file_content)
             
