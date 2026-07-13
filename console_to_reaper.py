@@ -100,15 +100,23 @@ def parse_digico_rtf(rtf_content):
                 if channel_match:
                     channel_num = channel_match.group(1).strip()
                     channel_name = parts[1].strip()
-                    
+
                     # Clean up name
                     channel_name = re.sub(r'\s+', ' ', channel_name)
-                    
+
                     if channel_name and channel_name.lower() not in ['name', '']:
+                        _digico_default_pats = {
+                            'inputs': re.compile(r'^Ch \d+$'),
+                            'aux':    re.compile(r'^Aux \d+$'),
+                            'groups': re.compile(r'^Grp \d+$'),
+                            'matrix': re.compile(r'^Matrix \d+$'),
+                        }
+                        is_default = bool(_digico_default_pats.get(current_section, re.compile(r'^$')).match(channel_name))
                         result[current_section].append({
                             'number': channel_num,
                             'name': channel_name,
-                            'type': current_section
+                            'type': current_section,
+                            'is_default': is_default,
                         })
                         if len(result[current_section]) <= 3:
                             print(f"  [{current_section}] {channel_num}: {channel_name}")
@@ -226,17 +234,21 @@ def parse_rivage_pm_show_file(file_content):
     # ── 5. Build the standard result structure ─────────────────────────────
     result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
 
+    _riv_inp = re.compile(r'^ch\d+$')
+    _riv_aux = re.compile(r'^MX\d+$')
+    _riv_mtx = re.compile(r'^MT\d+$')
+
     for i, name in enumerate(input_names):
-        result['inputs'].append({'number': str(i + 1), 'name': name, 'type': 'inputs'})
+        result['inputs'].append({'number': str(i + 1), 'name': name, 'type': 'inputs', 'is_default': bool(_riv_inp.match(name))})
 
     for i, name in enumerate(mix_names):
-        result['aux'].append({'number': f'MX{i+1}', 'name': name, 'type': 'aux'})
+        result['aux'].append({'number': f'MX{i+1}', 'name': name, 'type': 'aux', 'is_default': bool(_riv_aux.match(name))})
 
     for i, name in enumerate(stereo_names):
-        result['groups'].append({'number': f'ST{i+1}', 'name': name, 'type': 'groups'})
+        result['groups'].append({'number': f'ST{i+1}', 'name': name, 'type': 'groups', 'is_default': False})
 
     for i, name in enumerate(matrix_names):
-        result['matrix'].append({'number': f'MT{i+1}', 'name': name, 'type': 'matrix'})
+        result['matrix'].append({'number': f'MT{i+1}', 'name': name, 'type': 'matrix', 'is_default': bool(_riv_mtx.match(name))})
 
     print(f"\n=== RIVAGE PARSE SUMMARY ===")
     print(f"Inputs: {len(result['inputs'])}")
@@ -446,7 +458,8 @@ def parse_dlive_show_file(file_content):
                 number = f'{prefix_map[category]}{n}s'
             else:
                 number = f'{prefix_map[category]}{n}'
-            result[category].append({'number': number, 'name': name, 'type': category})
+            is_default = raw_name.isdigit()
+            result[category].append({'number': number, 'name': name, 'type': category, 'is_default': is_default})
 
     print(f"\n=== DLIVE PARSE SUMMARY ===")
     print(f"Inputs: {len(result['inputs'])}")
@@ -480,17 +493,21 @@ def parse_m32_show_file(file_content):
         num = int(num_str)
 
         if section == 'ch':
+            is_default = not name
             name = name if name else f'Ch {num:02d}'
-            result['inputs'].append({'number': str(num), 'name': name, 'type': 'inputs', 'color': None})
+            result['inputs'].append({'number': str(num), 'name': name, 'type': 'inputs', 'color': None, 'is_default': is_default})
         elif section == 'auxin':
+            is_default = not name
             name = name if name else f'Aux In {num}'
-            result['inputs'].append({'number': f'AUX{num}', 'name': name, 'type': 'inputs', 'color': None})
+            result['inputs'].append({'number': f'AUX{num}', 'name': name, 'type': 'inputs', 'color': None, 'is_default': is_default})
         elif section == 'bus':
+            is_default = not name
             name = name if name else f'Bus {num:02d}'
-            result['aux'].append({'number': f'BUS{num}', 'name': name, 'type': 'aux', 'color': None})
+            result['aux'].append({'number': f'BUS{num}', 'name': name, 'type': 'aux', 'color': None, 'is_default': is_default})
         elif section == 'mtx':
+            is_default = not name
             name = name if name else f'Mtx {num}'
-            result['matrix'].append({'number': f'MTX{num}', 'name': name, 'type': 'matrix', 'color': None})
+            result['matrix'].append({'number': f'MTX{num}', 'name': name, 'type': 'matrix', 'color': None, 'is_default': is_default})
 
     print(f"\n=== M32/X32 PARSE SUMMARY ===")
     print(f"Inputs: {len(result['inputs'])}")
@@ -596,7 +613,9 @@ def parse_wing_show_file(file_content):
             grp = conn.get('grp', '')
             src_in = str(conn.get('in', ''))
             name = source_names.get((grp, src_in), '')
-        return name if name else f'{default_label} {num:02d}'
+        if name:
+            return name, False
+        return f'{default_label} {num:02d}', True
 
     def get_src_mode(strip):
         conn = strip.get('in', {}).get('conn', {})
@@ -608,46 +627,52 @@ def parse_wing_show_file(file_content):
         if not isinstance(v, dict):
             continue
         num = int(k)
-        name = resolve_name(v, 'Ch', num)
+        name, is_default = resolve_name(v, 'Ch', num)
         src_mode = get_src_mode(v)
         if src_mode == 'ST':
             if name == last_stereo_name:
                 last_stereo_name = None
                 continue  # R side of stereo pair already added
             last_stereo_name = name
-            result['inputs'].append({'number': f'{num}s', 'name': name, 'type': 'inputs', 'color': None})
+            result['inputs'].append({'number': f'{num}s', 'name': name, 'type': 'inputs', 'color': None, 'is_default': is_default})
         else:
             last_stereo_name = None
-            result['inputs'].append({'number': str(num), 'name': name, 'type': 'inputs', 'color': None})
+            result['inputs'].append({'number': str(num), 'name': name, 'type': 'inputs', 'color': None, 'is_default': is_default})
 
     # 8 aux input strips
     for k, v in sorted(ae.get('aux', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
         if not isinstance(v, dict):
             continue
         num = int(k)
-        name = resolve_name(v, 'Aux', num)
-        result['inputs'].append({'number': f'AUX{num}', 'name': name, 'type': 'inputs', 'color': None})
+        name, is_default = resolve_name(v, 'Aux', num)
+        result['inputs'].append({'number': f'AUX{num}', 'name': name, 'type': 'inputs', 'color': None, 'is_default': is_default})
 
     # Mix buses, mains, matrix
     for k, v in sorted(ae.get('bus', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
         if isinstance(v, dict):
             num = int(k)
-            name = v.get('name', '').strip() or f'Bus {num:02d}'
+            name_raw = v.get('name', '').strip()
+            is_default = not name_raw
+            name = name_raw or f'Bus {num:02d}'
             is_stereo = not v.get('busmono', True)
             number = f'BUS{num}s' if is_stereo else f'BUS{num}'
-            result['aux'].append({'number': number, 'name': name, 'type': 'aux', 'color': None})
+            result['aux'].append({'number': number, 'name': name, 'type': 'aux', 'color': None, 'is_default': is_default})
 
     for k, v in sorted(ae.get('main', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
         if isinstance(v, dict):
             num = int(k)
-            name = v.get('name', '').strip() or f'Main {num}'
-            result['groups'].append({'number': f'MAIN{num}', 'name': name, 'type': 'groups', 'color': None})
+            name_raw = v.get('name', '').strip()
+            is_default = not name_raw
+            name = name_raw or f'Main {num}'
+            result['groups'].append({'number': f'MAIN{num}', 'name': name, 'type': 'groups', 'color': None, 'is_default': is_default})
 
     for k, v in sorted(ae.get('mtx', {}).items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
         if isinstance(v, dict):
             num = int(k)
-            name = v.get('name', '').strip() or f'Mtx {num:02d}'
-            result['matrix'].append({'number': f'MTX{num}', 'name': name, 'type': 'matrix', 'color': None})
+            name_raw = v.get('name', '').strip()
+            is_default = not name_raw
+            name = name_raw or f'Mtx {num:02d}'
+            result['matrix'].append({'number': f'MTX{num}', 'name': name, 'type': 'matrix', 'color': None, 'is_default': is_default})
 
     print(f"\n=== WING PARSE SUMMARY ===")
     print(f"Inputs (ch+aux): {len(result['inputs'])}")
@@ -706,31 +731,33 @@ def parse_sq_show_file(file_content):
         if in_stereo_zone and i % 2 == 1:
             continue  # R side of stereo pair — skip
         input_n += 1
-        name = read_name(i) or f'Input {input_n}'
+        raw = read_name(i)
+        is_default = not raw
+        name = raw or f'Input {input_n}'
         number = f'{input_n}s' if in_stereo_zone else str(input_n)
-        result['inputs'].append({'number': number, 'name': name, 'type': 'inputs'})
+        result['inputs'].append({'number': number, 'name': name, 'type': 'inputs', 'is_default': is_default})
 
     # Groups: records 72-79, bus IDs 64-71
     grp_n = 0
     for i in range(72, 80):
-        name = read_name(i)
-        if not name:
-            continue  # unused group bus slot
+        raw = read_name(i)
+        is_default = not raw
         grp_n += 1
         stereo = is_stereo(64 + (i - 72))
         number = f'GRP{grp_n}s' if stereo else f'GRP{grp_n}'
-        result['groups'].append({'number': number, 'name': name, 'type': 'groups'})
+        name = raw or f'Group {grp_n}'
+        result['groups'].append({'number': number, 'name': name, 'type': 'groups', 'is_default': is_default})
 
     # Aux: records 88-95, bus IDs 80-87 (stereo IEM or mono wedge per bitmask)
     aux_n = 0
     for i in range(88, 96):
-        name = read_name(i)
-        if not name:
-            continue
+        raw = read_name(i)
+        is_default = not raw
         aux_n += 1
         stereo = is_stereo(80 + (i - 88))
         number = f'AUX{aux_n}s' if stereo else f'AUX{aux_n}'
-        result['aux'].append({'number': number, 'name': name, 'type': 'aux'})
+        name = raw or f'Aux {aux_n}'
+        result['aux'].append({'number': number, 'name': name, 'type': 'aux', 'is_default': is_default})
 
     # Matrix: records 107-112, bus IDs 107-109.
     # Each stereo pair (bus 107-109) has a secondary mono slot (records 110-112).
@@ -739,14 +766,16 @@ def parse_sq_show_file(file_content):
     for pair in range(3):
         mtx_n += 1
         stereo = is_stereo(107 + pair)
-        name = read_name(107 + pair) or f'MTX {mtx_n}'
+        raw = read_name(107 + pair)
+        name = raw or f'MTX {mtx_n}'
         number = f'MTX{mtx_n}s' if stereo else f'MTX{mtx_n}'
-        result['matrix'].append({'number': number, 'name': name, 'type': 'matrix'})
+        result['matrix'].append({'number': number, 'name': name, 'type': 'matrix', 'is_default': not raw})
     for pair in range(3):
         if not is_stereo(107 + pair):
             mtx_n += 1
-            name = read_name(110 + pair) or f'MTX {mtx_n}'
-            result['matrix'].append({'number': f'MTX{mtx_n}', 'name': name, 'type': 'matrix'})
+            raw = read_name(110 + pair)
+            name = raw or f'MTX {mtx_n}'
+            result['matrix'].append({'number': f'MTX{mtx_n}', 'name': name, 'type': 'matrix', 'is_default': not raw})
 
     print(f"\n=== SQ PARSE SUMMARY ===")
     print(f"Inputs: {len(result['inputs'])}")
@@ -811,10 +840,11 @@ def parse_dm7_show_file(file_content):
         if mixing_data[name_off - 8:name_off] != b'STEREO\x00\x00':
             break
         name = mixing_data[name_off:name_off + 64].rstrip(b'\x00').decode('ascii', errors='replace').strip()
+        is_default = not name
         if not name:
             name = f'Ch {inp_num + 1:02d}'
         inp_num += 1
-        result['inputs'].append({'number': str(inp_num), 'name': name, 'type': 'inputs', 'color': None})
+        result['inputs'].append({'number': str(inp_num), 'name': name, 'type': 'inputs', 'color': None, 'is_default': is_default})
 
     # ── Mix buses (VARI records) ───────────────────────────────────────────────
     VARI_STRIDE   = 647
@@ -831,10 +861,11 @@ def parse_dm7_show_file(file_content):
             break
         name_off = vari_off + VARI_NAME_OFF
         name = mixing_data[name_off:name_off + 64].rstrip(b'\x00').decode('ascii', errors='replace').strip()
+        is_default = not name
         if not name:
             name = f'MX{aux_num + 1:02d}'
         aux_num += 1
-        result['aux'].append({'number': f'BUS{aux_num}', 'name': name, 'type': 'aux', 'color': None})
+        result['aux'].append({'number': f'BUS{aux_num}', 'name': name, 'type': 'aux', 'color': None, 'is_default': is_default})
         vari_off += VARI_STRIDE
         if mixing_data[vari_off:vari_off + 4] != b'VARI':
             break
@@ -858,10 +889,11 @@ def parse_dm7_show_file(file_content):
             if mixing_data[rec_start:rec_start + 3] != b'\x00\x00\x00':
                 break
             name = mixing_data[name_off:name_off + 64].rstrip(b'\x00').decode('ascii', errors='replace').strip()
+            is_default = not name
             if not name:
                 name = f'MT{mtx_num + 1:02d}'
             mtx_num += 1
-            result['matrix'].append({'number': f'MTX{mtx_num}', 'name': name, 'type': 'matrix', 'color': None})
+            result['matrix'].append({'number': f'MTX{mtx_num}', 'name': name, 'type': 'matrix', 'color': None, 'is_default': is_default})
 
     # ── Stereo buses (0x02-prefix records, deduplicated) ─────────────────────
     col0_st = mixing_data.find(b'COL0Stereo')
@@ -892,6 +924,92 @@ def parse_dm7_show_file(file_content):
     print(f"Mix buses (Aux): {len(result['aux'])}")
     print(f"Matrix: {len(result['matrix'])}")
     print(f"Stereo buses (Groups): {len(result['groups'])}")
+
+    return result
+
+
+def parse_lv1_show_file(file_content):
+    """Parse a Waves LV1 .emo session file (SQLite 3 database).
+
+    Channel names and types are in the snapshot_chainer table (snapshot_id=-1
+    is the live/active state).  Stereo detection uses chainer.output_stem_format:
+    101=stereo, 100=mono.  Channels with default placeholder names
+    ("Channel N", "Group N", "Matrix N") or empty names are skipped.
+
+    Channel types:  0=Input  1=Group  2=Aux  6=Matrix
+    """
+    import sqlite3, os, tempfile
+
+    if isinstance(file_content, str):
+        file_content = file_content.encode('latin-1')
+
+    # Must be a SQLite 3 file
+    if not file_content.startswith(b'SQLite format 3\x00'):
+        return {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.emo', delete=False) as tmp:
+            tmp.write(file_content)
+            tmp_path = tmp.name
+
+        db = sqlite3.connect(tmp_path)
+        cur = db.cursor()
+
+        # Counters for sequential numbering per section
+        counters = {'inputs': 0, 'aux': 0, 'groups': 0, 'matrix': 0}
+        prefix_map = {'inputs': '', 'aux': 'AUX', 'groups': 'GRP', 'matrix': 'MTX'}
+        type_to_section = {0: 'inputs', 1: 'groups', 2: 'aux', 6: 'matrix'}
+
+        cur.execute("""
+            SELECT o.obj_type, o.obj_index, sc.name, c.num_inputs
+            FROM snapshot_chainer sc
+            JOIN chainer c ON c.obj_id = sc.chainer_id
+            JOIN object o ON o.id = c.obj_id
+            WHERE sc.snapshot_id = -1 AND o.obj_type IN (0, 1, 2, 6)
+            ORDER BY o.obj_type, o.obj_index
+        """)
+
+        for obj_type, obj_index, name, num_inputs in cur.fetchall():
+            section = type_to_section[obj_type]
+            name = (name or '').strip()
+
+            # Detect placeholder / unused channels (e.g. "Channel 23", "Group 4")
+            default_n = obj_index + 1
+            section_label = {'inputs': 'Channel', 'groups': 'Group',
+                             'aux': 'Aux', 'matrix': 'Matrix'}[section]
+            is_default = (not name) or (name == f'{section_label} {default_n}')
+            if not name:
+                name = f'{section_label} {default_n}'
+
+            # Inputs are always mono sources on the LV1 (one physical input per strip).
+            # For buses: num_inputs=2 means stereo mix, num_inputs=1 means mono.
+            stereo = (num_inputs == 2) and (section != 'inputs')
+            counters[section] += 1
+            n = counters[section]
+            pfx = prefix_map[section]
+
+            if section == 'inputs':
+                number = str(n)
+            else:
+                number = f'{pfx}{n}s' if stereo else f'{pfx}{n}'
+
+            result[section].append({'number': number, 'name': name, 'type': section, 'is_default': is_default})
+
+        db.close()
+
+    except Exception as e:
+        print(f"LV1 parse error: {e}")
+        return {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    print(f"\n=== LV1 PARSE SUMMARY ===")
+    for k in ['inputs', 'aux', 'groups', 'matrix']:
+        print(f"{k.capitalize()}: {len(result[k])}")
 
     return result
 
@@ -1017,60 +1135,16 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-            background: #f5f5f7;
-            padding: 40px 20px;
-            transition: background 0.3s;
-        }
-        body.dark {
-            background: #000;
-        }
-        body.dark .container {
             background: #1a1a1a;
-            box-shadow: 0 2px 20px rgba(0,0,0,0.6);
+            padding: 40px 20px;
         }
-        body.dark h1, body.dark .track-name, body.dark .track-number,
-        body.dark label, body.dark span, body.dark p, body.dark li {
-            color: #e0e0e0;
-        }
-        body.dark .subtitle, body.dark .credit { color: #888; }
-        body.dark .preview-list, body.dark .info-box,
-        body.dark #sectionSelector { background: #111; }
-        body.dark .track-item { background: #222; border-color: #333; }
-        body.dark .track-item:hover { background: #2a2a2a; }
-        body.dark .track-item.active-highlight { background: #1a2a3a; }
-        body.dark .upload-area { background: #111; border-color: #444; }
-        body.dark .upload-area:hover { background: #1a1a1a; border-color: #007aff; }
-        body.dark .upload-text { color: #ccc; }
-        body.dark .upload-subtext { color: #666; }
-        body.dark .stereo-toggle-options { background: #2a2a2a; }
-        body.dark .stereo-option { color: #888; }
-        body.dark .stereo-option.active { background: #444; color: #fff; }
-        .dark-mode-btn {
-            position: fixed;
-            top: 16px;
-            right: 20px;
-            background: #1d1d1f;
-            color: white;
-            border: none;
-            border-radius: 20px;
-            padding: 8px 16px;
-            font-size: 13px;
-            font-weight: 500;
-            cursor: pointer;
-            z-index: 999;
-            transition: background 0.2s;
-        }
-        .dark-mode-btn:hover { background: #333; }
-        body.dark .dark-mode-btn { background: #444; }
-        body.dark .dark-mode-btn:hover { background: #555; }
         .container {
             max-width: 1000px;
             margin: 0 auto;
             background: white;
             border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            box-shadow: 0 4px 24px rgba(0,0,0,0.4);
             padding: 40px;
-            transition: background 0.3s, box-shadow 0.3s;
         }
         h1 {
             color: #1d1d1f;
@@ -1128,9 +1202,6 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             border-color: #e5e5ea;
             border-bottom-color: white;
         }
-        body.dark .tab-bar { border-bottom-color: #333; }
-        body.dark .tab:hover { background: #2a2a2a; color: #e0e0e0; }
-        body.dark .tab.active { background: #1a1a1a; color: #fff; border-color: #333; border-bottom-color: #1a1a1a; }
         .tab-name { outline: none; }
         .tab-close {
             display: inline-block;
@@ -1156,8 +1227,6 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             transition: background 0.15s, color 0.15s;
         }
         .tab-add:hover { background: #f2f2f7; color: #007aff; border-color: #007aff; }
-        body.dark .tab-add { border-color: #444; color: #666; }
-        body.dark .tab-add:hover { background: #222; color: #007aff; }
         .upload-area {
             border: 3px dashed #d2d2d7;
             border-radius: 12px;
@@ -1536,8 +1605,6 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             border-color: #1a6fc4;
             color: #1a6fc4;
         }
-        body.dark .stereo-btn { background: #333; color: #666; border-color: #444; }
-        body.dark .stereo-btn.is-stereo { background: #1a2d42; color: #5ba3f5; border-color: #2a5080; }
         .track-name {
             color: #1d1d1f;
             flex: 1;
@@ -1652,8 +1719,6 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
 <body>
     <div class="container">
         <div class="credit">
-            <button class="dark-mode-btn" id="darkModeBtn" onclick="toggleDarkMode()">🌙 Dark Mode</button>
-
         Built by Michael Leckrone<br>
             <a href="mailto:leckroneaudio@gmail.com">leckroneaudio@gmail.com</a>
         </div>
@@ -1661,15 +1726,15 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div class="tab-bar" id="tabBar"></div>
 
         <h1>Console to Reaper Converter</h1>
-        <p class="subtitle">Convert DiGiCo, Yamaha Rivage, A&amp;H dLive/Avantis/SQ, Behringer X32/M32, or Behringer Wing show files to Reaper track templates</p>
+        <p class="subtitle">Convert show files from DiGiCo, Yamaha Rivage/DM7, A&amp;H dLive/Avantis/SQ, Behringer X32/M32/Wing, Avid S6L, or Waves LV1 to Reaper track templates</p>
 
         <div id="uploadArea" class="upload-area" onclick="document.getElementById('fileInput').click()">
             <div class="upload-icon">📄</div>
             <div class="upload-text">Drop your show file here</div>
-            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f)</div>
+            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f) &nbsp;·&nbsp; Waves LV1 (.emo)</div>
         </div>
 
-        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
+        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,.emo,.EMO,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
         
         <div id="message" class="message"></div>
         
@@ -1696,7 +1761,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 <div class="select-buttons">
                     <button onclick="selectAll()">Select All</button>
                     <button onclick="selectNone()">Deselect All</button>
-                    <button onclick="removeUnnamed()" title="Deselect channels that still have their default name">Remove Unnamed</button>
+                    <button onclick="removeUnnamed()" title="Remove channels with console-default placeholder names (Cmd+Z to undo)">Remove Unnamed</button>
                     <button id="undoBtn" onclick="undo()" disabled style="opacity: 0.4;">↩ Undo</button>
                     <button onclick="openAddChannelModal()" style="background: #007aff; color: white;">+ Add Channel</button>
                 </div>
@@ -1787,6 +1852,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 <li><strong>Behringer Wing:</strong> Save a snapshot from the console or Wing-Edit (.snap)</li>
                 <li><strong>Avid S6L / VENUE:</strong> Save a show file from the console or VENUE software (.dsh)</li>
                 <li><strong>Yamaha DM7:</strong> Copy the .dm7f project file from the DM7 or DM7 Compact (.dm7f)</li>
+                <li><strong>Waves LV1:</strong> Save session from LV1 software, upload the .emo file</li>
                 <li>Upload or drag the file here</li>
                 <li>Select/deselect channels you want to import</li>
                 <li>Download the .RTrackTemplate file</li>
@@ -2100,10 +2166,10 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             uploadArea.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             const name = file ? file.name.toLowerCase() : '';
-            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f') || name.endsWith('.dat'))) {
+            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f') || name.endsWith('.dat') || name.endsWith('.emo'))) {
                 handleFile(file);
             } else {
-                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive/Avantis), .dat (A&H SQ), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), or .dm7f (Yamaha DM7) file', 'error');
+                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive/Avantis), .dat (A&H SQ), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), .dm7f (Yamaha DM7), or .emo (Waves LV1) file', 'error');
             }
         });
         
@@ -2584,23 +2650,40 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         }
 
         function removeUnnamed() {
-            // Deselect channels that still have a default/auto-generated name.
-            // Matches: bare numbers ("1", "64"), and our dLive descriptive defaults
-            // ("Input 4", "Mono Aux 3", "Stereo Grp 1", "DCA 12", etc.)
-            const defaultPattern = /^(Input|Mono Grp|Stereo Grp|Mono Aux|Stereo Aux|Main|Mono Mtx|Stereo Mtx|Monitor|DCA) \d+$|^\d+$/;
-
+            const toRemove = new Set();
             currentCombinedChannels.forEach((ch, idx) => {
-                if (defaultPattern.test(ch.name.trim())) {
-                    selectedChannels.delete(idx);
-                }
+                if (ch.is_default) toRemove.add(idx);
             });
+            if (toRemove.size === 0) return;
 
-            document.querySelectorAll('.track-checkbox').forEach(cb => {
-                const idx = parseInt(cb.dataset.idx);
-                if (!selectedChannels.has(idx)) cb.checked = false;
+            saveUndo();
+
+            // Remap selectedChannels and activeChannels around removed indices
+            const newSelected = new Set();
+            selectedChannels.forEach(i => {
+                if (toRemove.has(i)) return;
+                let shift = 0;
+                toRemove.forEach(r => { if (r < i) shift++; });
+                newSelected.add(i - shift);
             });
+            selectedChannels = newSelected;
 
-            updateSelectedCount();
+            const newActive = new Set();
+            activeChannels.forEach(i => {
+                if (toRemove.has(i)) return;
+                let shift = 0;
+                toRemove.forEach(r => { if (r < i) shift++; });
+                newActive.add(i - shift);
+            });
+            activeChannels = newActive;
+
+            const kept = currentCombinedChannels.filter((_, idx) => !toRemove.has(idx));
+            currentCombinedChannels.length = 0;
+            currentCombinedChannels.push(...kept);
+
+            showPreview(currentCombinedChannels);
+            refreshSectionCounts();
+            updateBulkBar();
         }
 
         function downloadTemplate() {
@@ -2705,11 +2788,6 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             });
         }
         
-        function toggleDarkMode() {
-            const isDark = document.body.classList.toggle('dark');
-            document.getElementById('darkModeBtn').textContent = isDark ? '☀️ Light Mode' : '🌙 Dark Mode';
-        }
-
         function setStereoMode(mode) {
             stereoMode = mode;
             ['optSplit', 'optSplitBottom'].forEach(id => {
@@ -3081,9 +3159,16 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 parsed_data = parse_dm7_show_file(file_content)
             elif filename.lower().endswith('.dat'):
                 parsed_data = parse_sq_show_file(file_content)
+            elif filename.lower().endswith('.emo'):
+                parsed_data = parse_lv1_show_file(file_content)
             else:
                 parsed_data = parse_digico_rtf(file_content)
-            
+
+            # Ensure every channel has the is_default field (parsers that don't set it → False)
+            for section in parsed_data.values():
+                for ch in section:
+                    ch.setdefault('is_default', False)
+
             self.send_json({
                 'success': True,
                 'sections': parsed_data,  # Send all sections
