@@ -928,6 +928,108 @@ def parse_dm7_show_file(file_content):
     return result
 
 
+def parse_s_series_show_file(file_content):
+    """Parse a DiGiCo S Series .session file (SQLite 3 database).
+
+    Channel table at snapshotId=0 holds the live/working state.
+    Channel types:
+      0 = Input channels
+      1 = Bus channels (busMode=0 → aux send, busMode=1 → group/subgroup)
+      2 = Control Groups / DCAs (skip — no audio routing)
+      3 = Master bus (skip)
+      4 = Matrix outputs
+      5 = Solo buses (skip)
+    The 'stereoMode' column: 1 = true stereo channel, 0 = mono.
+    ('stereo' is a different field and not reliable for this purpose.)
+    """
+    import sqlite3, os, tempfile
+
+    if isinstance(file_content, str):
+        file_content = file_content.encode('latin-1')
+
+    if not file_content.startswith(b'SQLite format 3\x00'):
+        return {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    tmp = tempfile.NamedTemporaryFile(suffix='.session', delete=False)
+    try:
+        tmp.write(file_content)
+        tmp.close()
+        con = sqlite3.connect(tmp.name)
+        cur = con.cursor()
+
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='Channel'")
+        if not cur.fetchone():
+            return result
+
+        # Inputs
+        cur.execute("""
+            SELECT channelNumber, name, stereoMode FROM Channel
+            WHERE snapshotId=0 AND type=0 ORDER BY channelNumber
+        """)
+        inp_n = 0
+        for ch_num, name, stereo_mode in cur.fetchall():
+            inp_n += 1
+            name = (name or '').strip()
+            is_default = not name or bool(re.match(r'^Input \d+$', name))
+            if not name:
+                name = f'Input {ch_num}'
+            number = f'{inp_n}s' if stereo_mode == 1 else str(inp_n)
+            result['inputs'].append({'number': number, 'name': name, 'type': 'inputs', 'is_default': is_default})
+
+        # Buses — aux (busMode=0) and groups (busMode=1 or NULL)
+        cur.execute("""
+            SELECT channelNumber, name, stereoMode, busMode FROM Channel
+            WHERE snapshotId=0 AND type=1 ORDER BY channelNumber
+        """)
+        aux_n = grp_n = 0
+        for ch_num, name, stereo_mode, bus_mode in cur.fetchall():
+            name = (name or '').strip()
+            is_stereo = stereo_mode == 1
+            if bus_mode == 0:
+                aux_n += 1
+                is_default = not name
+                if not name:
+                    name = f'Aux {aux_n}'
+                number = f'AUX{aux_n}s' if is_stereo else f'AUX{aux_n}'
+                result['aux'].append({'number': number, 'name': name, 'type': 'aux', 'is_default': is_default})
+            else:
+                grp_n += 1
+                is_default = not name or bool(re.match(r'^Group \d+$', name))
+                if not name:
+                    name = f'Group {grp_n}'
+                number = f'GRP{grp_n}s' if is_stereo else f'GRP{grp_n}'
+                result['groups'].append({'number': number, 'name': name, 'type': 'groups', 'is_default': is_default})
+
+        # Matrix
+        cur.execute("""
+            SELECT channelNumber, name, stereoMode FROM Channel
+            WHERE snapshotId=0 AND type=4 ORDER BY channelNumber
+        """)
+        mtx_n = 0
+        for ch_num, name, stereo_mode in cur.fetchall():
+            mtx_n += 1
+            name = (name or '').strip()
+            is_default = not name or bool(re.match(r'^Matrix \d+$', name))
+            if not name:
+                name = f'Matrix {ch_num}'
+            number = f'MTX{mtx_n}s' if stereo_mode == 1 else f'MTX{mtx_n}'
+            result['matrix'].append({'number': number, 'name': name, 'type': 'matrix', 'is_default': is_default})
+
+        con.close()
+    finally:
+        os.unlink(tmp.name)
+
+    print(f"\n=== S SERIES PARSE SUMMARY ===")
+    print(f"Inputs: {len(result['inputs'])}")
+    print(f"Aux: {len(result['aux'])}")
+    print(f"Groups: {len(result['groups'])}")
+    print(f"Matrix: {len(result['matrix'])}")
+
+    return result
+
+
 def parse_lv1_show_file(file_content):
     """Parse a Waves LV1 .emo session file (SQLite 3 database).
 
@@ -1726,15 +1828,15 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div class="tab-bar" id="tabBar"></div>
 
         <h1>Console to Reaper Converter</h1>
-        <p class="subtitle">Convert show files from DiGiCo, Yamaha Rivage/DM7, A&amp;H dLive/Avantis/SQ, Behringer X32/M32/Wing, Avid S6L, or Waves LV1 to Reaper track templates</p>
+        <p class="subtitle">Convert show files from DiGiCo SD/S Series, Yamaha Rivage/DM7, A&amp;H dLive/Avantis/SQ, Behringer X32/M32/Wing, Avid S6L, or Waves LV1 to Reaper track templates</p>
 
         <div id="uploadArea" class="upload-area" onclick="document.getElementById('fileInput').click()">
             <div class="upload-icon">📄</div>
             <div class="upload-text">Drop your show file here</div>
-            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f) &nbsp;·&nbsp; Waves LV1 (.emo)</div>
+            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; DiGiCo S Series (.session) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f) &nbsp;·&nbsp; Waves LV1 (.emo)</div>
         </div>
 
-        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,.emo,.EMO,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
+        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,.emo,.EMO,.session,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
         
         <div id="message" class="message"></div>
         
@@ -1844,7 +1946,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div class="info-box">
             <h3>How to use:</h3>
             <ol>
-                <li><strong>DiGiCo:</strong> Export session report from the console (.rtf file)</li>
+                <li><strong>DiGiCo SD/SD Range:</strong> Export session report from the console (.rtf file)</li>
+                <li><strong>DiGiCo S Series:</strong> Copy the .session file from the console or S Series software (.session)</li>
                 <li><strong>Yamaha Rivage PM:</strong> Copy the .RIVAGEPM show file from the console or Rivage PM Editor</li>
                 <li><strong>Allen &amp; Heath dLive / Avantis:</strong> Export the show file from dLive Director or Avantis Director (.tar.gz)</li>
                 <li><strong>Allen &amp; Heath SQ:</strong> Export a scene from SQ-MixPad or save to USB from the console (.dat)</li>
@@ -2166,10 +2269,10 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             uploadArea.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             const name = file ? file.name.toLowerCase() : '';
-            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f') || name.endsWith('.dat') || name.endsWith('.emo'))) {
+            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f') || name.endsWith('.dat') || name.endsWith('.emo') || name.endsWith('.session'))) {
                 handleFile(file);
             } else {
-                showMessage('Please upload a .rtf (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive/Avantis), .dat (A&H SQ), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), .dm7f (Yamaha DM7), or .emo (Waves LV1) file', 'error');
+                showMessage('Please upload a .rtf or .session (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive/Avantis), .dat (A&H SQ), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), .dm7f (Yamaha DM7), or .emo (Waves LV1) file', 'error');
             }
         });
         
@@ -3161,6 +3264,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 parsed_data = parse_sq_show_file(file_content)
             elif filename.lower().endswith('.emo'):
                 parsed_data = parse_lv1_show_file(file_content)
+            elif filename.lower().endswith('.session'):
+                parsed_data = parse_s_series_show_file(file_content)
             else:
                 parsed_data = parse_digico_rtf(file_content)
 
