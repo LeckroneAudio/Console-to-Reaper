@@ -3763,37 +3763,68 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_json({'success': False, 'error': str(e)})
     
+    def send_tsv(self, text):
+        """Send plain-text TSV response (consumed by the Reaper Lua script)"""
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(text.encode())
+
     def handle_osc_fetch(self):
-        """Fetch channel data live from a DiGiCo console over OSC"""
+        """Fetch channel data live from a DiGiCo console over OSC.
+
+        JSON response by default (browser UI); pass "format": "tsv" for the
+        line format the Reaper Lua script parses. TSV errors are a single
+        line 'error<TAB>code<TAB>message<TAB>0<TAB>0' where code 0 means
+        no-response (retryable) and 1 means a local/setup problem."""
         try:
             content_length = int(self.headers['Content-Length'])
             body = self.rfile.read(content_length)
             data = json.loads(body.decode())
+            as_tsv = (data.get('format') == 'tsv')
+
+            def fail(msg, code=1):
+                if as_tsv:
+                    self.send_tsv('error\t%d\t%s\t0\t0\n' % (code, msg))
+                else:
+                    self.send_json({'success': False, 'error': msg})
 
             ip = (data.get('ip') or '').strip()
             send_port = int(data.get('send_port') or 8012)
             listen_port = int(data.get('listen_port') or 8011)
             if not ip:
-                self.send_json({'success': False, 'error': 'Console IP is required'})
+                fail('Console IP is required')
                 return
 
             try:
                 parsed_data, console_name, session_name = \
                     fetch_digico_osc(ip, send_port, listen_port)
             except OSError:
-                self.send_json({'success': False, 'error':
-                    f'Could not listen on port {listen_port} — is Companion or '
-                    'another OSC app already using it? Pick a different port and '
-                    'update the console\'s External Control device entry.'})
+                fail(f'Could not listen on port {listen_port} — is Companion or '
+                     'another OSC app already using it? Pick a different port and '
+                     'update the console\'s External Control device entry.')
                 return
 
             total = sum(len(v) for v in parsed_data.values())
             if total == 0:
-                self.send_json({'success': False, 'error':
-                    f'No response from the console at {ip}. Check that External '
-                    'Control is enabled, a device entry (type iPad) points at this '
-                    f'computer, and the ports match (console Rcv {send_port} / '
-                    f'Send {listen_port}).'})
+                fail(f'No response from the console at {ip}. Check that External '
+                     'Control is enabled, a device entry (type iPad) points at this '
+                     f'computer, and the ports match (console Rcv {send_port} / '
+                     f'Send {listen_port}).', code=0)
+                return
+
+            if as_tsv:
+                num_re = re.compile(r'^[A-Z]+(\d+)(s?)$')
+                lines = ['meta\t0\t%s\t0\t0' % console_name,
+                         'meta\t1\t%s\t0\t0' % session_name]
+                for key in ('inputs', 'aux', 'groups', 'matrix'):
+                    for c in parsed_data.get(key, []):
+                        m = num_re.match(c['number'])
+                        n = m.group(1) if m else '0'
+                        stereo = 1 if (m and m.group(2)) else 0
+                        lines.append('%s\t%s\t%s\t%d\t%d' % (
+                            key, n, c['name'], 1 if c.get('is_default') else 0, stereo))
+                self.send_tsv('\n'.join(lines) + '\n')
                 return
 
             source = console_name or ip
@@ -3813,6 +3844,12 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             })
 
         except Exception as e:
+            try:
+                if data.get('format') == 'tsv':
+                    self.send_tsv('error\t1\t%s\t0\t0\n' % e)
+                    return
+            except Exception:
+                pass
             self.send_json({'success': False, 'error': str(e)})
 
     def handle_generate(self):
