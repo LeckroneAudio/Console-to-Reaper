@@ -3919,6 +3919,20 @@ class ConsoleToReaperApp(rumps.App):
         self.server = None
         self.server_thread = None
         self.port = None
+
+        # Opt out of macOS App Nap: as a windowless GUI app this process
+        # gets its scheduling throttled to the background tier when it
+        # looks idle, which stretches a ~1s OSC fetch to 20-90s. Holding
+        # an NSActivity keeps normal scheduling while the server runs.
+        self._nsactivity = None
+        try:
+            from Foundation import NSProcessInfo
+            NSActivityUserInitiatedAllowingIdleSystemSleep = 0x00FFFFFF & ~0x00100000
+            self._nsactivity = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+                NSActivityUserInitiatedAllowingIdleSystemSleep,
+                "Console to Reaper server handles network requests")
+        except Exception:
+            pass
         
         # Menu items
         self.menu = [

@@ -16,6 +16,7 @@ OPTIONS = {
         'CFBundleShortVersionString': '3.5.0',
         'LSUIElement': False,  # Show in Dock
         'NSHighResolutionCapable': True,
+        'NSAppSleepDisabled': True,  # no App Nap — server must stay responsive
     },
 }
 
