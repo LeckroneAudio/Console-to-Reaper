@@ -108,9 +108,11 @@ def fetch(console_ip, send_port, listen_port, quiet=False):
                 last_rx = time.time()
 
     # ---- phase 1: console info, counts, stereo modes (iPad set only) ----
-    info = {'counts': {}, 'modes': {}, 'console': '', 'session': ''}
+    info = {'counts': {}, 'modes': {}, 'console': '', 'session': '',
+            'alive': False}
 
     def sink1(addr, args):
+        info['alive'] = True
         if addr == '/Console/Name' and args:
             info['console'] = str(args[0])
         elif addr == '/Console/Session/Filename' and args:
@@ -127,9 +129,12 @@ def fetch(console_ip, send_port, listen_port, quiet=False):
                 except (TypeError, ValueError):
                     pass
 
+    # the input-1 name query doubles as a reachability probe: the generic
+    # command set ignores /Console queries but answers names
     for q in ['/Console/Name/?', '/Console/Session/Filename/?', '/Console/Channels/?',
               '/Console/Input_Channels/modes/?', '/Console/Aux_Outputs/modes/?',
-              '/Console/Group_Outputs/modes/?', '/Console/Matrix_Outputs/modes/?']:
+              '/Console/Group_Outputs/modes/?', '/Console/Matrix_Outputs/modes/?',
+              '/Input_Channels/1/Channel_Input/name/?']:
         sock.sendto(osc_query(q), dest)
         time.sleep(0.01)
     # matrix modes never answers, so "everything" = counts + 3 mode arrays
@@ -139,6 +144,14 @@ def fetch(console_ip, send_port, listen_port, quiet=False):
     mode_lens = {k: len(v) for k, v in info['modes'].items()}
     log(f"console={info['console']!r} session={info['session']!r} "
         f"counts={info['counts']} modes={mode_lens}")
+
+    # nothing at all answered: console unreachable — fail fast instead of
+    # grinding through the retry rounds
+    if not info['alive']:
+        log('no response — console unreachable')
+        sock.close()
+        return {'_console': '', '_session': '',
+                'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
 
     # ---- phase 2: pipelined name queries ----
     pending = {}   # acceptable reply address (no prefix) -> (key, n)
@@ -160,12 +173,28 @@ def fetch(console_ip, send_port, listen_port, quiet=False):
     for attempt in range(3):
         if not pending:
             break
+        got_before = len(names)
         for want, pkt in queries.items():
             if want in pending:
                 sock.sendto(pkt, dest)
                 time.sleep(0.002)
-        collect(1.2, sink2, done=lambda: not pending, idle=0.35)
+        # retries answer within milliseconds; only the first pass needs
+        # a generous window
+        collect(1.2 if attempt == 0 else 0.5, sink2,
+                done=lambda: not pending, idle=0.35)
         log(f'name pass {attempt + 1}: {len(names)} replies, {len(pending)} outstanding')
+        if attempt == 0 and pending:
+            # channels above the highest reply per section don't exist
+            # (only matters when counts were unavailable); keep a margin
+            # for genuinely dropped replies near the top
+            top = {}
+            for (k, n) in names:
+                top[k] = max(top.get(k, 0), n)
+            for want, (k, n) in list(pending.items()):
+                if n > top.get(k, 0) + 8:
+                    del pending[want]
+        if attempt > 0 and len(names) == got_before:
+            break  # nothing new is coming
     sock.close()
 
     # ---- assemble ----

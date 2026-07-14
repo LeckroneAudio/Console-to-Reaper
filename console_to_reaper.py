@@ -1462,9 +1462,11 @@ def fetch_digico_osc(console_ip, send_port, listen_port):
 
     try:
         # phase 1: console info, counts, stereo modes (iPad command set)
-        info = {'counts': {}, 'modes': {}, 'console': '', 'session': ''}
+        info = {'counts': {}, 'modes': {}, 'console': '', 'session': '',
+                'alive': False}
 
         def sink1(addr, args):
+            info['alive'] = True
             if addr == '/Console/Name' and args:
                 info['console'] = str(args[0])
             elif addr == '/Console/Session/Filename' and args:
@@ -1481,16 +1483,25 @@ def fetch_digico_osc(console_ip, send_port, listen_port):
                     except (TypeError, ValueError):
                         pass
 
+        # the input-1 name query doubles as a reachability probe: the
+        # generic command set ignores /Console queries but answers names
         for q in ['/Console/Name/?', '/Console/Session/Filename/?',
                   '/Console/Channels/?', '/Console/Input_Channels/modes/?',
                   '/Console/Aux_Outputs/modes/?', '/Console/Group_Outputs/modes/?',
-                  '/Console/Matrix_Outputs/modes/?']:
+                  '/Console/Matrix_Outputs/modes/?',
+                  '/Input_Channels/1/Channel_Input/name/?']:
             sock.sendto(osc_query(q), dest)
             time.sleep(0.01)
         # matrix modes never answers, so "everything" = counts + 3 mode arrays
         collect(1.2, sink1, done=lambda: (
             len(info['counts']) >= 4 and len(info['modes']) >= 3
             and info['console'] and info['session']))
+
+        # nothing at all answered: console unreachable — fail fast instead
+        # of grinding through the retry rounds
+        if not info['alive']:
+            return ({'inputs': [], 'aux': [], 'groups': [], 'matrix': []},
+                    '', '')
 
         # phase 2: pipelined name queries with retries
         pending = {}
@@ -1509,14 +1520,30 @@ def fetch_digico_osc(console_ip, send_port, listen_port):
             if a in pending and args and isinstance(args[0], str):
                 names[pending.pop(a)] = args[0]
 
-        for _attempt in range(3):
+        for attempt in range(3):
             if not pending:
                 break
+            got_before = len(names)
             for want, pkt in queries.items():
                 if want in pending:
                     sock.sendto(pkt, dest)
                     time.sleep(0.002)
-            collect(1.2, sink2, done=lambda: not pending, idle=0.35)
+            # retries answer within milliseconds; only the first pass
+            # needs a generous window
+            collect(1.2 if attempt == 0 else 0.5, sink2,
+                    done=lambda: not pending, idle=0.35)
+            if attempt == 0 and pending:
+                # channels above the highest reply per section don't exist
+                # (only matters when counts were unavailable); keep a margin
+                # for genuinely dropped replies near the top
+                top = {}
+                for (k, n) in names:
+                    top[k] = max(top.get(k, 0), n)
+                for want, (k, n) in list(pending.items()):
+                    if n > top.get(k, 0) + 8:
+                        del pending[want]
+            if attempt > 0 and len(names) == got_before:
+                break  # nothing new is coming
     finally:
         sock.close()
 
