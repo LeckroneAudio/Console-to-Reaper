@@ -224,3 +224,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# OSC protocol exploration outputs (dev artifacts)
+dump_*.txt
+explore*_results.txt
+probe_*.txt
+restructure_capture.txt
