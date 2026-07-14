@@ -1030,6 +1030,193 @@ def parse_s_series_show_file(file_content):
     return result
 
 
+def parse_ses_show_file(file_content):
+    """Parse a DiGiCo SD-series .ses binary show file.
+
+    Structure: 92-stride labeled sections (Aux Outputs, Matrix Outputs,
+    Group Outputs, Input Channels) preceded by 119-byte headers hold the
+    current channel counts and stereo flags, but their name fields are
+    display buffers that the console overwrites IN PLACE without clearing —
+    a shorter new name leaves the tail of the old name behind (e.g. 'RC'
+    written over 'Aux 6' reads back as 'RCx 6').
+
+    Clean null-terminated copies of the current names exist elsewhere in
+    the file: inputs and groups in 212-stride state blocks (several copies;
+    the right one is found by scoring prefix-compatibility against the
+    labeled section), and aux/matrix names in scattered state arrays that
+    serve as a dictionary for reconstructing true names from the dirty
+    display buffers.
+    """
+    if isinstance(file_content, str):
+        file_content = file_content.encode('latin-1')
+    if file_content[:7] != b'DiGiCo ':
+        return {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+
+    data = file_content
+    result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+    STRIDE_92 = 92
+    STRIDE_212 = 212
+
+    def find_section(label_bytes):
+        pos = data.find(label_bytes)
+        if pos < 0:
+            return None
+        count = struct.unpack_from('<H', data, pos + 106)[0]
+        return (pos, pos + 119, count)
+
+    def get_name(off):
+        field = data[off:off+32]
+        null_pos = field.find(b'\x00')
+        return (field[:null_pos] if null_pos >= 0 else field).decode('ascii', errors='replace')
+
+    secs = {label: find_section(label) for label in
+            [b'Aux Outputs', b'Matrix Outputs', b'Group Outputs', b'Input Channels']}
+    positions = [s[0] for s in secs.values() if s]
+    if not positions:
+        return result
+    # The labeled sections themselves contain the dirty strings; exclude
+    # this region so dictionary lookups only hit clean copies elsewhere.
+    excl_lo = min(positions) - 1000
+    excl_hi = max(positions) + 100 * STRIDE_92 + 2000
+
+    def in_dict(name):
+        """True if name appears null-terminated outside the labeled sections."""
+        pat = name.encode('latin-1', errors='replace') + b'\x00'
+        s = 0
+        while True:
+            p = data.find(pat, s)
+            if p < 0:
+                return False
+            if not (excl_lo <= p <= excl_hi):
+                return True
+            s = p + 1
+
+    _default_res = {'Ch': re.compile(r'^Ch \d+$'), 'Aux': re.compile(r'^Aux \d+$'),
+                    'Grp': re.compile(r'^Grp \d+$'), 'Matrix': re.compile(r'^Matrix \d+$')}
+    _digit_tail = re.compile(r'^(.*[A-Za-z])(\d{1,2})$')
+
+    def clean_name(stored, prefix, n, stereo=False):
+        """Recover the true name from a dirty display buffer.
+
+        Returns (name, is_default)."""
+        stored = stored.rstrip()
+        if not stored or _default_res[prefix].match(stored):
+            return stored, True
+        # 1) name written over this channel's default ('Ch 27' -> 'Evan7')
+        D = '%s %d' % (prefix, n)
+        if len(D) == len(stored):
+            for k in range(2, len(stored)):
+                if stored[k:] == D[k:] and stored[:k] != D[:k]:
+                    return stored[:k].rstrip(), False
+        # 2) stereo channels have a clean '<name> R' partner leg on file
+        if stereo:
+            for k in range(len(stored), 1, -1):
+                if in_dict(stored[:k].rstrip() + ' R'):
+                    return stored[:k].rstrip(), False
+        # 3) longest prefix that exists null-terminated elsewhere
+        for k in range(len(stored), 1, -1):
+            if in_dict(stored[:k]):
+                got = stored[:k].rstrip()
+                # 4) letter-digit junction with the digitless form on file
+                #    is likely leftover ('Tony3' -> 'Tony')
+                if got == stored:
+                    m = _digit_tail.match(stored)
+                    if m and in_dict(m.group(1)):
+                        return m.group(1), False
+                return got, False
+        return stored, False
+
+    def find_best_block(labeled):
+        """Locate the 212-stride state block matching the labeled section.
+
+        Candidate offsets come from clean occurrences of prefixes of the
+        first labeled name; each is scored by how many records are
+        prefix-compatible with the labeled names (true names are always
+        prefixes of the dirty display strings)."""
+        first = labeled[0]
+        cands = set()
+        for k in range(len(first), 1, -1):
+            pat = first[:k].encode('latin-1', errors='replace') + b'\x00'
+            s = 0
+            while len(cands) < 400:
+                p = data.find(pat, s)
+                if p < 0:
+                    break
+                if not (excl_lo <= p <= excl_hi):
+                    cands.add(p)
+                s = p + 1
+        best_score, best_off = 0, None
+        for p in cands:
+            score = 0
+            for i, L in enumerate(labeled):
+                b = get_name(p + i * STRIDE_212)
+                if b and (L == b or L.startswith(b)):
+                    score += 1
+            if score > best_score or (score == best_score and
+                                      (best_off is None or p > best_off)):
+                best_score, best_off = score, p
+        return best_score, best_off
+
+    # ---- Inputs ----
+    inp_sec = secs[b'Input Channels']
+    if inp_sec:
+        _, ic_off, inp_cnt = inp_sec
+        labeled = [get_name(ic_off + i * STRIDE_92) for i in range(inp_cnt)]
+        i_stereo = [data[ic_off + i * STRIDE_92 + 32] == 0x02 for i in range(inp_cnt)]
+        score, blk = find_best_block(labeled)
+        _def = _default_res['Ch']
+        for i in range(inp_cnt):
+            if blk is not None and score >= inp_cnt * 0.6:
+                name = get_name(blk + i * STRIDE_212).rstrip()
+                is_default = not name or bool(_def.match(name))
+            else:
+                name, is_default = clean_name(labeled[i], 'Ch', i + 1, i_stereo[i])
+            if not name:
+                name = 'Ch %d' % (i + 1)
+            result['inputs'].append({'number': 'CH%d%s' % (i + 1, 's' if i_stereo[i] else ''),
+                                     'name': name, 'type': 'inputs', 'is_default': is_default})
+
+    # ---- Groups ----
+    grp_sec = secs[b'Group Outputs']
+    if grp_sec:
+        _, g_off, g_cnt = grp_sec
+        labeled = [get_name(g_off + i * STRIDE_92) for i in range(g_cnt)]
+        g_stereo = [data[g_off + i * STRIDE_92 + 32] == 0x02 for i in range(g_cnt)]
+        score, blk = find_best_block(labeled)
+        _def = _default_res['Grp']
+        for i in range(g_cnt):
+            if blk is not None and score >= g_cnt * 0.75:
+                name = get_name(blk + i * STRIDE_212).rstrip()
+                is_default = not name or bool(_def.match(name))
+            else:
+                name, is_default = clean_name(labeled[i], 'Grp', i + 1, g_stereo[i])
+            if not name:
+                name = 'Grp %d' % (i + 1)
+            result['groups'].append({'number': 'GRP%d%s' % (i + 1, 's' if g_stereo[i] else ''),
+                                     'name': name, 'type': 'groups', 'is_default': is_default})
+
+    # ---- Aux / Matrix ----
+    for label, key, pfx, num_pfx in [(b'Aux Outputs', 'aux', 'Aux', 'AUX'),
+                                     (b'Matrix Outputs', 'matrix', 'Matrix', 'MTX')]:
+        s = secs[label]
+        if not s:
+            continue
+        _, off, cnt = s
+        for i in range(cnt):
+            stereo = data[off + i * STRIDE_92 + 32] == 0x02
+            name, is_default = clean_name(get_name(off + i * STRIDE_92), pfx, i + 1, stereo)
+            if not name:
+                name = '%s %d' % (pfx, i + 1)
+            result[key].append({'number': '%s%d%s' % (num_pfx, i + 1, 's' if stereo else ''),
+                                'name': name, 'type': key, 'is_default': is_default})
+
+    print(f"\n=== SES PARSE SUMMARY ===")
+    print(f"Inputs: {len(result['inputs'])}, Aux: {len(result['aux'])}, "
+          f"Groups: {len(result['groups'])}, Matrix: {len(result['matrix'])}")
+
+    return result
+
+
 def parse_lv1_show_file(file_content):
     """Parse a Waves LV1 .emo session file (SQLite 3 database).
 
@@ -1183,6 +1370,178 @@ def generate_reaper_track_template(channels, stereo_mode='split'):
     return '\n'.join(template_lines)
 
 
+def fetch_digico_osc(console_ip, send_port, listen_port):
+    """Fetch channel names + stereo flags live from a DiGiCo console over OSC.
+
+    Requires an External Control device entry on the console (type iPad
+    preferred) pointing at this computer. Query-only: every message ends in
+    '/?' with no arguments — bare addresses are SETTERS on DiGiCo consoles
+    and must never be sent.
+
+    iPad command set: /Console/Channels/? gives per-section counts,
+    /Console/<Section>/modes/? gives stereo flags (1=mono, 2=stereo),
+    names via /{Section}/{n}/.../name/?. The generic OSC command set answers
+    names only (replies carry an /sd prefix) — both are accepted.
+
+    Returns (parsed_data, console_name, session_name).
+    Raises OSError if the listen port cannot be bound.
+    """
+    import socket
+    import time
+
+    def osc_pad(b):
+        return b + b'\x00' * ((4 - len(b) % 4) % 4)
+
+    def osc_query(address):
+        return osc_pad(address.encode('ascii') + b'\x00') + osc_pad(b',\x00')
+
+    def osc_parse(data):
+        try:
+            if data[:1] != b'/':
+                return None
+            end = data.index(b'\x00')
+            address = data[:end].decode('ascii')
+            i = (end + 4) & ~3
+            if i >= len(data) or data[i:i+1] != b',':
+                return address, []
+            tend = data.index(b'\x00', i)
+            tags = data[i+1:tend].decode('ascii')
+            i = (tend + 4) & ~3
+            args = []
+            for t in tags:
+                if t == 'i':
+                    args.append(struct.unpack('>i', data[i:i+4])[0]); i += 4
+                elif t == 'f':
+                    args.append(struct.unpack('>f', data[i:i+4])[0]); i += 4
+                elif t == 's':
+                    send = data.index(b'\x00', i)
+                    args.append(data[i:send].decode('ascii', 'replace'))
+                    i = (send + 4) & ~3
+                else:
+                    return address, args
+            return address, args
+        except Exception:
+            return None
+
+    SECTIONS = [
+        ('inputs', 'Input_Channels', 'Channel_Input/name', 'Ch', 'CH', 128),
+        ('aux', 'Aux_Outputs', 'Buss_Trim/name', 'Aux', 'AUX', 48),
+        ('groups', 'Group_Outputs', 'Buss_Trim/name', 'Grp', 'GRP', 24),
+        ('matrix', 'Matrix_Outputs', 'Buss_Trim/name', 'Matrix', 'MTX', 24),
+    ]
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind(('0.0.0.0', int(listen_port)))
+    except OSError:
+        sock.close()
+        raise
+    sock.settimeout(0.05)
+    dest = (console_ip, int(send_port))
+
+    def collect(max_wait, sink, done=None, idle=0.25):
+        """Read replies until `done()` is satisfied, the line goes idle
+        after at least one reply, or `max_wait` elapses."""
+        deadline = time.time() + max_wait
+        last_rx = None
+        while time.time() < deadline:
+            if done and done():
+                break
+            if last_rx is not None and (time.time() - last_rx) > idle:
+                break
+            try:
+                data, _ = sock.recvfrom(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            p = osc_parse(data)
+            if p:
+                sink(p[0], p[1])
+                last_rx = time.time()
+
+    try:
+        # phase 1: console info, counts, stereo modes (iPad command set)
+        info = {'counts': {}, 'modes': {}, 'console': '', 'session': ''}
+
+        def sink1(addr, args):
+            if addr == '/Console/Name' and args:
+                info['console'] = str(args[0])
+            elif addr == '/Console/Session/Filename' and args:
+                info['session'] = str(args[0])
+            else:
+                m = re.match(r'^/Console/(\w+)/modes$', addr)
+                if m:
+                    info['modes'][m.group(1)] = [int(v) for v in args]
+                    return
+                m = re.match(r'^/Console/(\w+)$', addr)
+                if m and args:
+                    try:
+                        info['counts'][m.group(1)] = int(args[0])
+                    except (TypeError, ValueError):
+                        pass
+
+        for q in ['/Console/Name/?', '/Console/Session/Filename/?',
+                  '/Console/Channels/?', '/Console/Input_Channels/modes/?',
+                  '/Console/Aux_Outputs/modes/?', '/Console/Group_Outputs/modes/?',
+                  '/Console/Matrix_Outputs/modes/?']:
+            sock.sendto(osc_query(q), dest)
+            time.sleep(0.01)
+        # matrix modes never answers, so "everything" = counts + 3 mode arrays
+        collect(1.2, sink1, done=lambda: (
+            len(info['counts']) >= 4 and len(info['modes']) >= 3
+            and info['console'] and info['session']))
+
+        # phase 2: pipelined name queries with retries
+        pending = {}
+        queries = {}
+        for key, section, leaf, _, _, max_n in SECTIONS:
+            count = min(info['counts'].get(section, max_n), max_n)
+            for n in range(1, count + 1):
+                want = '/%s/%d/%s' % (section, n, leaf)
+                pending[want] = (key, n)
+                queries[want] = osc_query(want + '/?')
+
+        names = {}
+
+        def sink2(addr, args):
+            a = addr[3:] if addr.startswith('/sd/') else addr
+            if a in pending and args and isinstance(args[0], str):
+                names[pending.pop(a)] = args[0]
+
+        for _attempt in range(3):
+            if not pending:
+                break
+            for want, pkt in queries.items():
+                if want in pending:
+                    sock.sendto(pkt, dest)
+                    time.sleep(0.002)
+            collect(1.2, sink2, done=lambda: not pending, idle=0.35)
+    finally:
+        sock.close()
+
+    parsed = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
+    for key, section, leaf, def_prefix, num_prefix, _ in SECTIONS:
+        def_re = re.compile(r'^%s \d+$' % def_prefix)
+        modes = info['modes'].get(section, [])
+        got_ns = [n for (k, n) in names if k == key]
+        count = max(got_ns) if got_ns else 0
+        for n in range(1, count + 1):
+            name = names.get((key, n))
+            if name is None:
+                continue
+            name = name.rstrip()
+            is_default = (not name) or bool(def_re.match(name))
+            stereo = (modes[n-1] == 2) if n <= len(modes) else False
+            parsed[key].append({
+                'number': '%s%d%s' % (num_prefix, n, 's' if stereo else ''),
+                'name': name or ('%s %d' % (def_prefix, n)),
+                'type': key, 'is_default': is_default,
+            })
+
+    return parsed, info['console'], info['session']
+
+
 def find_available_port(start_port=8081, max_attempts=10):
     """Find an available port starting from start_port"""
     for port in range(start_port, start_port + max_attempts):
@@ -1222,6 +1581,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             self.handle_conversion()
         elif self.path == '/generate':
             self.handle_generate()
+        elif self.path == '/osc_fetch':
+            self.handle_osc_fetch()
         else:
             self.send_error(404)
     
@@ -1358,6 +1719,52 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         }
         .upload-subtext {
             font-size: 14px;
+            color: #86868b;
+        }
+        .osc-bar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin: 14px 0 0;
+            padding: 14px 16px;
+            background: #f5f5f7;
+            border-radius: 12px;
+        }
+        .osc-bar-label {
+            font-size: 14px;
+            font-weight: 600;
+            color: #1d1d1f;
+            margin-right: 4px;
+        }
+        .osc-bar input {
+            padding: 8px 10px;
+            font-size: 14px;
+            border: 1px solid #d1d1d6;
+            border-radius: 8px;
+            background: #fff;
+        }
+        .osc-bar input:focus {
+            outline: none;
+            border-color: #007aff;
+        }
+        .osc-ip { width: 150px; }
+        .osc-port { width: 78px; }
+        .osc-bar button {
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #fff;
+            background: #007aff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        .osc-bar button:hover { background: #0066d6; }
+        .osc-bar button:disabled { background: #a7c8f0; cursor: default; }
+        .osc-hint {
+            flex-basis: 100%;
+            font-size: 12px;
             color: #86868b;
         }
         input[type="file"] {
@@ -1833,11 +2240,20 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div id="uploadArea" class="upload-area" onclick="document.getElementById('fileInput').click()">
             <div class="upload-icon">📄</div>
             <div class="upload-text">Drop your show file here</div>
-            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo (.rtf) &nbsp;·&nbsp; DiGiCo S Series (.session) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f) &nbsp;·&nbsp; Waves LV1 (.emo)</div>
+            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo SD (.ses, .rtf) &nbsp;·&nbsp; DiGiCo S Series (.session) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f) &nbsp;·&nbsp; Waves LV1 (.emo)</div>
         </div>
 
-        <input type="file" id="fileInput" accept=".rtf,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,.emo,.EMO,.session,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
-        
+        <input type="file" id="fileInput" accept=".rtf,.ses,.SES,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,.emo,.EMO,.session,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
+
+        <div class="osc-bar">
+            <span class="osc-bar-label">📡 Or pull live from console (DiGiCo OSC):</span>
+            <input type="text" id="oscIp" class="osc-ip" placeholder="Console IP" spellcheck="false">
+            <input type="text" id="oscSendPort" class="osc-port" placeholder="Rcv 8012" title="The console's Rcv port" spellcheck="false">
+            <input type="text" id="oscListenPort" class="osc-port" placeholder="Send 8011" title="The console's Send port" spellcheck="false">
+            <button id="oscConnectBtn" onclick="fetchFromConsole()">Connect</button>
+            <span class="osc-hint">Console: Setup &gt; External Control &gt; add device (type iPad) with this computer's IP. Enter the same Send and Rcv ports as the console's device entry.</span>
+        </div>
+
         <div id="message" class="message"></div>
         
         <div style="text-align: right; margin: -15px 0 20px;">
@@ -1946,7 +2362,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div class="info-box">
             <h3>How to use:</h3>
             <ol>
-                <li><strong>DiGiCo SD/SD Range:</strong> Export session report from the console (.rtf file)</li>
+                <li><strong>DiGiCo SD/SD Range:</strong> Copy the show file directly from the console or SD-Rack USB (.ses), or export a session report (.rtf)</li>
                 <li><strong>DiGiCo S Series:</strong> Copy the .session file from the console or S Series software (.session)</li>
                 <li><strong>Yamaha Rivage PM:</strong> Copy the .RIVAGEPM show file from the console or Rivage PM Editor</li>
                 <li><strong>Allen &amp; Heath dLive / Avantis:</strong> Export the show file from dLive Director or Avantis Director (.tar.gz)</li>
@@ -2269,13 +2685,46 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             uploadArea.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
             const name = file ? file.name.toLowerCase() : '';
-            if (file && (name.endsWith('.rtf') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f') || name.endsWith('.dat') || name.endsWith('.emo') || name.endsWith('.session'))) {
+            if (file && (name.endsWith('.rtf') || name.endsWith('.ses') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f') || name.endsWith('.dat') || name.endsWith('.emo') || name.endsWith('.session'))) {
                 handleFile(file);
             } else {
-                showMessage('Please upload a .rtf or .session (DiGiCo), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive/Avantis), .dat (A&H SQ), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), .dm7f (Yamaha DM7), or .emo (Waves LV1) file', 'error');
+                showMessage('Please upload a .ses or .rtf (DiGiCo SD), .session (DiGiCo S Series), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive/Avantis), .dat (A&H SQ), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), .dm7f (Yamaha DM7), or .emo (Waves LV1) file', 'error');
             }
         });
         
+        function applyParsedData(data, sourceLabel) {
+            // Store all sections
+            parsedSections = data.sections;
+
+            // Update section counts
+            document.getElementById('inputsCount').textContent = data.counts.inputs;
+            document.getElementById('auxCount').textContent = data.counts.aux;
+            document.getElementById('groupsCount').textContent = data.counts.groups;
+            document.getElementById('matrixCount').textContent = data.counts.matrix;
+
+            // Show/hide checkboxes based on what's available
+            document.getElementById('includeInputs').disabled = data.counts.inputs === 0;
+            document.getElementById('includeAux').disabled = data.counts.aux === 0;
+            document.getElementById('includeGroups').disabled = data.counts.groups === 0;
+            document.getElementById('includeMatrix').disabled = data.counts.matrix === 0;
+
+            // Update preview with selected sections
+            updateSectionPreview();
+
+            const total = data.counts.inputs + data.counts.aux + data.counts.groups + data.counts.matrix;
+            if (total === 0) {
+                const ext = sourceLabel.split('.').pop().toLowerCase();
+                const hint = (ext === 'rtf')
+                    ? ' Please ensure Include: Channels is selected when saving the Session Report.'
+                    : (ext === 'show')
+                    ? ' If using a Wing show file, make sure at least one snapshot has been saved into it.'
+                    : '';
+                showMessage('✗ "' + sourceLabel + '" — No Channels Found.' + hint, 'error');
+            } else {
+                showMessage(`✓ "${sourceLabel}" — ${total} total channels (${data.counts.inputs} inputs, ${data.counts.aux} aux, ${data.counts.groups} groups, ${data.counts.matrix} matrix)`, 'success');
+            }
+        }
+
         function handleFile(file) {
             if (!file) return;
 
@@ -2283,9 +2732,9 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
 
             const formData = new FormData();
             formData.append('file', file);
-            
+
             showMessage('Processing file...', 'success');
-            
+
             fetch('/convert', {
                 method: 'POST',
                 body: formData
@@ -2293,36 +2742,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
-                    // Store all sections
-                    parsedSections = data.sections;
-                    
-                    // Update section counts
-                    document.getElementById('inputsCount').textContent = data.counts.inputs;
-                    document.getElementById('auxCount').textContent = data.counts.aux;
-                    document.getElementById('groupsCount').textContent = data.counts.groups;
-                    document.getElementById('matrixCount').textContent = data.counts.matrix;
-                    
-                    // Show/hide checkboxes based on what's available
-                    document.getElementById('includeInputs').disabled = data.counts.inputs === 0;
-                    document.getElementById('includeAux').disabled = data.counts.aux === 0;
-                    document.getElementById('includeGroups').disabled = data.counts.groups === 0;
-                    document.getElementById('includeMatrix').disabled = data.counts.matrix === 0;
-                    
-                    // Update preview with selected sections
-                    updateSectionPreview();
-
-                    const total = data.counts.inputs + data.counts.aux + data.counts.groups + data.counts.matrix;
-                    if (total === 0) {
-                        const ext = name.split('.').pop().toLowerCase();
-                        const hint = (ext === 'rtf')
-                            ? ' Please ensure Include: Channels is selected when saving the Session Report.'
-                            : (ext === 'show')
-                            ? ' If using a Wing show file, make sure at least one snapshot has been saved into it.'
-                            : '';
-                        showMessage('✗ "' + file.name + '" — No Channels Found.' + hint, 'error');
-                    } else {
-                        showMessage(`✓ "${file.name}" — ${total} total channels (${data.counts.inputs} inputs, ${data.counts.aux} aux, ${data.counts.groups} groups, ${data.counts.matrix} matrix)`, 'success');
-                    }
+                    applyParsedData(data, file.name);
                 } else {
                     showMessage('✗ Error: ' + data.error, 'error');
                 }
@@ -2331,6 +2751,59 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 showMessage('✗ Error processing file: ' + err, 'error');
             });
         }
+
+        function fetchFromConsole() {
+            const ip = document.getElementById('oscIp').value.trim();
+            const sp = document.getElementById('oscSendPort').value.trim() || '8012';
+            const lp = document.getElementById('oscListenPort').value.trim() || '8011';
+            if (!ip) {
+                showMessage('✗ Enter the console IP address', 'error');
+                return;
+            }
+            try {
+                localStorage.setItem('oscSettings', JSON.stringify({ip: ip, sp: sp, lp: lp}));
+            } catch (e) {}
+
+            ['inputs', 'aux', 'groups', 'matrix'].forEach(type => clearColorFromSection(type));
+
+            const btn = document.getElementById('oscConnectBtn');
+            btn.disabled = true;
+            btn.textContent = 'Connecting…';
+            showMessage('Connecting to console at ' + ip + '…', 'success');
+
+            fetch('/osc_fetch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ip: ip, send_port: sp, listen_port: lp})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    applyParsedData(data, data.source || ip);
+                } else {
+                    showMessage('✗ ' + data.error, 'error');
+                }
+            })
+            .catch(err => {
+                showMessage('✗ Error connecting to console: ' + err, 'error');
+            })
+            .finally(() => {
+                btn.disabled = false;
+                btn.textContent = 'Connect';
+            });
+        }
+
+        // Restore saved OSC connection settings
+        (function() {
+            try {
+                const s = JSON.parse(localStorage.getItem('oscSettings') || 'null');
+                if (s) {
+                    document.getElementById('oscIp').value = s.ip || '';
+                    document.getElementById('oscSendPort').value = s.sp || '';
+                    document.getElementById('oscListenPort').value = s.lp || '';
+                }
+            } catch (e) {}
+        })();
         
         function updateSectionPreview() {
             // ALWAYS show all channels from all sections
@@ -3266,6 +3739,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 parsed_data = parse_lv1_show_file(file_content)
             elif filename.lower().endswith('.session'):
                 parsed_data = parse_s_series_show_file(file_content)
+            elif filename.lower().endswith('.ses'):
+                parsed_data = parse_ses_show_file(file_content)
             else:
                 parsed_data = parse_digico_rtf(file_content)
 
@@ -3288,6 +3763,58 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_json({'success': False, 'error': str(e)})
     
+    def handle_osc_fetch(self):
+        """Fetch channel data live from a DiGiCo console over OSC"""
+        try:
+            content_length = int(self.headers['Content-Length'])
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode())
+
+            ip = (data.get('ip') or '').strip()
+            send_port = int(data.get('send_port') or 8012)
+            listen_port = int(data.get('listen_port') or 8011)
+            if not ip:
+                self.send_json({'success': False, 'error': 'Console IP is required'})
+                return
+
+            try:
+                parsed_data, console_name, session_name = \
+                    fetch_digico_osc(ip, send_port, listen_port)
+            except OSError:
+                self.send_json({'success': False, 'error':
+                    f'Could not listen on port {listen_port} — is Companion or '
+                    'another OSC app already using it? Pick a different port and '
+                    'update the console\'s External Control device entry.'})
+                return
+
+            total = sum(len(v) for v in parsed_data.values())
+            if total == 0:
+                self.send_json({'success': False, 'error':
+                    f'No response from the console at {ip}. Check that External '
+                    'Control is enabled, a device entry (type iPad) points at this '
+                    f'computer, and the ports match (console Rcv {send_port} / '
+                    f'Send {listen_port}).'})
+                return
+
+            source = console_name or ip
+            if session_name:
+                source += ' — ' + session_name
+
+            self.send_json({
+                'success': True,
+                'sections': parsed_data,
+                'source': source,
+                'counts': {
+                    'inputs': len(parsed_data['inputs']),
+                    'aux': len(parsed_data['aux']),
+                    'groups': len(parsed_data['groups']),
+                    'matrix': len(parsed_data['matrix'])
+                }
+            })
+
+        except Exception as e:
+            self.send_json({'success': False, 'error': str(e)})
+
     def handle_generate(self):
         """Generate template from selected channels"""
         try:
