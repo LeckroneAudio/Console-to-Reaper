@@ -4,7 +4,7 @@ Console to Reaper Track Template Converter
 Parses show files from multiple consoles and generates Reaper track templates
 """
 
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import io
 import json
 import os
@@ -3945,7 +3945,7 @@ class ConsoleToReaperApp(rumps.App):
             rumps.quit_application()
             return
         
-        self.server = HTTPServer(('localhost', self.port), DiGiCoToReaperHandler)
+        self.server = ThreadingHTTPServer(('localhost', self.port), DiGiCoToReaperHandler)
         
         # Run server in background thread
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
