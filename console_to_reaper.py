@@ -929,7 +929,7 @@ def parse_dm7_show_file(file_content):
 
 
 def parse_s_series_show_file(file_content):
-    """Parse a DiGiCo S Series .session file (SQLite 3 database).
+    """Parse a DiGiCo S-Series .session file (SQLite 3 database).
 
     Channel table at snapshotId=0 holds the live/working state.
     Channel types:
@@ -1031,7 +1031,7 @@ def parse_s_series_show_file(file_content):
 
 
 def parse_ses_show_file(file_content):
-    """Parse a DiGiCo SD-series .ses binary show file.
+    """Parse a DiGiCo SD/Quantum .ses binary show file.
 
     Structure: 92-stride labeled sections (Aux Outputs, Matrix Outputs,
     Group Outputs, Input Channels) preceded by 119-byte headers hold the
@@ -2262,12 +2262,12 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div class="tab-bar" id="tabBar"></div>
 
         <h1>Console to Reaper Converter</h1>
-        <p class="subtitle">Convert show files from DiGiCo SD/S Series, Yamaha Rivage/DM7, A&amp;H dLive/Avantis/SQ, Behringer X32/M32/Wing, Avid S6L, or Waves LV1 to Reaper track templates</p>
+        <p class="subtitle">Convert show files from DiGiCo SD/Quantum/S-Series, Yamaha Rivage/DM7, A&amp;H dLive/Avantis/SQ, Behringer X32/Wing, Midas M32, Avid S6L, or Waves LV1 to Reaper track templates</p>
 
         <div id="uploadArea" class="upload-area" onclick="document.getElementById('fileInput').click()">
             <div class="upload-icon">📄</div>
             <div class="upload-text">Drop your show file here</div>
-            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo SD (.ses, .rtf) &nbsp;·&nbsp; DiGiCo S Series (.session) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; X32/M32 (.scn) &nbsp;·&nbsp; Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f) &nbsp;·&nbsp; Waves LV1 (.emo)</div>
+            <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo SD/Quantum (.ses, .rtf) &nbsp;·&nbsp; DiGiCo S-Series (.session) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; Behringer X32 / Midas M32 (.scn) &nbsp;·&nbsp; Behringer Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f) &nbsp;·&nbsp; Waves LV1 (.emo)</div>
         </div>
 
         <input type="file" id="fileInput" accept=".rtf,.ses,.SES,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,.emo,.EMO,.session,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
@@ -2389,8 +2389,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         <div class="info-box">
             <h3>How to use:</h3>
             <ol>
-                <li><strong>DiGiCo SD/SD Range:</strong> Copy the show file directly from the console or SD-Rack USB (.ses), or export a session report (.rtf)</li>
-                <li><strong>DiGiCo S Series:</strong> Copy the .session file from the console or S Series software (.session)</li>
+                <li><strong>DiGiCo SD / Quantum:</strong> Copy the show file directly from the console USB (.ses), export a session report (.rtf), or pull channels live over OSC using the bar above</li>
+                <li><strong>DiGiCo S-Series:</strong> Copy the .session file from the console or S-Series software (.session)</li>
                 <li><strong>Yamaha Rivage PM:</strong> Copy the .RIVAGEPM show file from the console or Rivage PM Editor</li>
                 <li><strong>Allen &amp; Heath dLive / Avantis:</strong> Export the show file from dLive Director or Avantis Director (.tar.gz)</li>
                 <li><strong>Allen &amp; Heath SQ:</strong> Export a scene from SQ-MixPad or save to USB from the console (.dat)</li>
@@ -2715,7 +2715,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             if (file && (name.endsWith('.rtf') || name.endsWith('.ses') || name.endsWith('.rivagepm') || name.endsWith('.tar.gz') || name.endsWith('.scn') || name.endsWith('.snap') || name.endsWith('.dsh') || name.endsWith('.dm7f') || name.endsWith('.dat') || name.endsWith('.emo') || name.endsWith('.session'))) {
                 handleFile(file);
             } else {
-                showMessage('Please upload a .ses or .rtf (DiGiCo SD), .session (DiGiCo S Series), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive/Avantis), .dat (A&H SQ), .scn (X32/M32), .snap (Wing), .dsh (Avid S6L), .dm7f (Yamaha DM7), or .emo (Waves LV1) file', 'error');
+                showMessage('Please upload a .ses or .rtf (DiGiCo SD/Quantum), .session (DiGiCo S-Series), .RIVAGEPM (Yamaha Rivage), .tar.gz (A&H dLive/Avantis), .dat (A&H SQ), .scn (Behringer X32 / Midas M32), .snap (Behringer Wing), .dsh (Avid S6L), .dm7f (Yamaha DM7), or .emo (Waves LV1) file', 'error');
             }
         });
         

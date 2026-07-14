@@ -318,7 +318,7 @@ if is_ses then
     channels = parse_ses_inputs(content)
     if not channels then
         reaper.ShowMessageBox(
-            "Not a valid DiGiCo SD show file.\n\nMake sure this is a .ses file saved from\na DiGiCo SD-series console.",
+            "Not a valid DiGiCo show file.\n\nMake sure this is a .ses file saved from\na DiGiCo SD or Quantum console.",
             "DiGiCo to Reaper", 0)
         return
     end

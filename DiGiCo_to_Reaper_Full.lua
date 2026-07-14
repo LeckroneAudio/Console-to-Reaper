@@ -634,7 +634,7 @@ local parsed
 if is_ses then
     parsed=parse_ses(content)
     if not parsed then
-        reaper.ShowMessageBox("Not a valid DiGiCo SD show file (.ses).","DiGiCo to Reaper",0)
+        reaper.ShowMessageBox("Not a valid DiGiCo SD/Quantum show file (.ses).","DiGiCo to Reaper",0)
         return
     end
 else
