@@ -210,7 +210,7 @@ def test_http_endpoint(app):
 
 
 def test_embedded_sync():
-    lua_text = open(os.path.join(ROOT, 'DiGiCo_OSC_to_Reaper.lua')).read()
+    lua_text = open(os.path.join(ROOT, 'Lua Scripts', 'DiGiCo_OSC_to_Reaper.lua')).read()
     m = re.search(r'local PYFETCH = \[==\[\n(.*?)\]==\]', lua_text, re.S)
     canon = open(os.path.join(ROOT, 'digico_osc_fetch.py')).read()
     ok = bool(m) and m.group(1) == canon
@@ -228,9 +228,10 @@ def test_lua_compiles():
     check = lua.eval(b'function(src) local f, e = load(src) '
                      b'if f then return "" else return e end end')
     bad = []
-    for f in sorted(os.listdir(ROOT)):
+    lua_dir = os.path.join(ROOT, 'Lua Scripts')
+    for f in sorted(os.listdir(lua_dir)):
         if f.endswith('.lua'):
-            err = check(open(os.path.join(ROOT, f), 'rb').read())
+            err = check(open(os.path.join(lua_dir, f), 'rb').read())
             if err:
                 bad.append(f'{f}: {err.decode()[:60]}')
     report('Lua scripts compile', not bad, '; '.join(bad))

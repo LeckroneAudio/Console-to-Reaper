@@ -15,7 +15,7 @@ import re
 import sys
 
 FETCHER = 'digico_osc_fetch.py'
-LUA = 'DiGiCo_OSC_to_Reaper.lua'
+LUA = 'Lua Scripts/DiGiCo_OSC_to_Reaper.lua'
 
 
 def main():
