@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: console-to-reaper
+    runtime: python
+    plan: free
+    buildCommand: "python3 -m pip install --upgrade pip"
+    startCommand: "python3 console_to_reaper.py"
+    healthCheckPath: /heartbeat
+    envVars:
+      - key: CONSOLE_TO_REAPER_WEB
+        value: "1"
+      - key: PYTHON_VERSION
+        value: "3.11.9"

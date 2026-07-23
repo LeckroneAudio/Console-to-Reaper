@@ -23,22 +23,35 @@ from urllib.parse import parse_qs
 
 IS_MAC = platform.system() == 'Darwin'
 
-if IS_MAC:
-    try:
-        import rumps
-    except ImportError:
-        print("Installing rumps...")
-        subprocess.run([sys.executable, '-m', 'pip', 'install', 'rumps', '--break-system-packages'], check=True)
-        import rumps
+# Hosted/headless mode: no tray icon (a server container has no GUI to put
+# one in), server binds to all interfaces on $PORT, and OSC live-import is
+# disabled since it needs to run on the console's local network.
+WEB_MODE = os.environ.get('CONSOLE_TO_REAPER_WEB', '') == '1'
+
+if not WEB_MODE:
+    if IS_MAC:
+        try:
+            import rumps
+        except ImportError:
+            print("Installing rumps...")
+            subprocess.run([sys.executable, '-m', 'pip', 'install', 'rumps', '--break-system-packages'], check=True)
+            import rumps
+    else:
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+        except ImportError:
+            print("Installing pystray + Pillow...")
+            subprocess.run([sys.executable, '-m', 'pip', 'install', 'pystray', 'Pillow'], check=True)
+            import pystray
+            from PIL import Image, ImageDraw
 else:
-    try:
-        import pystray
-        from PIL import Image, ImageDraw
-    except ImportError:
-        print("Installing pystray + Pillow...")
-        subprocess.run([sys.executable, '-m', 'pip', 'install', 'pystray', 'Pillow'], check=True)
-        import pystray
-        from PIL import Image, ImageDraw
+    # Headless web mode never instantiates ConsoleToReaperApp, but its
+    # `class ConsoleToReaperApp(rumps.App):` statement below still resolves
+    # `rumps.App` at module-load time — stand in with a harmless base class.
+    class _RumpsStub:
+        App = object
+    rumps = _RumpsStub()
 
 def parse_digico_rtf(rtf_content):
     """Parse DiGiCo RTF session report and extract all channel sections"""
@@ -3728,12 +3741,20 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
 </body>
 </html>
         '''
-        
+
+        if WEB_MODE:
+            # OSC live-import needs to run on the console's local network —
+            # hide the bar rather than editing the template (JS elsewhere
+            # references these elements unconditionally by id).
+            html = html.replace(
+                '</head>',
+                '<style>.osc-bar{display:none!important}</style></head>', 1)
+
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
         self.wfile.write(html.encode())
-    
+
     def handle_conversion(self):
         """Handle file upload and parsing"""
         try:
@@ -3830,6 +3851,12 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                     self.send_tsv('error\t%d\t%s\t0\t0\n' % (code, msg))
                 else:
                     self.send_json({'success': False, 'error': msg})
+
+            if WEB_MODE:
+                fail('Live OSC import is not available on the hosted version — '
+                     'it needs to run on the same network as the console. '
+                     'Use the desktop app instead, or upload a show file below.')
+                return
 
             ip = (data.get('ip') or '').strip()
             send_port = int(data.get('send_port') or 8012)
@@ -4111,8 +4138,22 @@ class ConsoleToReaperTrayApp:
         self.icon.run(setup=_setup)
 
 
+def run_web():
+    """Headless server for hosted deployment — no tray icon, no browser
+    auto-open, binds every interface on $PORT (falls back to 8081 locally)."""
+    port = int(os.environ.get('PORT', 8081))
+    server = ThreadingHTTPServer(('0.0.0.0', port), DiGiCoToReaperHandler)
+    print(f"✅ Server running on 0.0.0.0:{port} (web mode)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+
+
 if __name__ == "__main__":
-    if IS_MAC:
+    if WEB_MODE:
+        run_web()
+    elif IS_MAC:
         ConsoleToReaperApp().run()
     else:
         ConsoleToReaperTrayApp().run()
