@@ -1,32 +1,46 @@
--- Behringer Wing to Reaper — Input Channel Importer
--- Parses a Wing .snap snapshot file and creates tracks for all Input Channels.
--- Requires Python 3 (comes with the Console to Reaper app).
+-- DiGiCo S-Series to Reaper — Input Channel Importer
+-- Parses a DiGiCo S-Series .session file (SQLite 3 database) and creates tracks for all Input Channels.
 --
 -- Installation:
 --   1. Actions > Load ReaScript, select this file
---   2. Assign shortcut: Actions > Action List → find script → Add shortcut → Cmd+Shift+W
+--   2. Assign shortcut: Actions > Action List → find script → Add shortcut
 
 -- ============================================================
 -- PYTHON PARSER (embedded — requires Python 3)
 -- ============================================================
 
 local PYTHON_SCRIPT = [[
-import sys, json
+import sys, sqlite3, os, tempfile
 
-with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as fh:
-    data = json.load(fh)
+with open(sys.argv[1], 'rb') as fh:
+    content = fh.read()
 
-ae = data.get('ae_data') or data
-lcl = ae.get('io', {}).get('in', {}).get('LCL', {})
+if not content.startswith(b'SQLite format 3\x00'):
+    sys.exit(1)
 
-for k, v in sorted(lcl.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
-    if not isinstance(v, dict):
-        continue
-    num = int(k) if k.isdigit() else 0
-    name = v.get('name', '').strip()
-    if not name:
-        name = 'Ch {:02d}'.format(num)
-    print(name)
+tmp = tempfile.NamedTemporaryFile(suffix='.session', delete=False)
+try:
+    tmp.write(content)
+    tmp.close()
+    con = sqlite3.connect(tmp.name)
+    cur = con.cursor()
+
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='Channel'")
+    if not cur.fetchone():
+        sys.exit(0)
+
+    cur.execute("""
+        SELECT channelNumber, name FROM Channel
+        WHERE snapshotId=0 AND type=0 ORDER BY channelNumber
+    """)
+    for ch_num, name in cur.fetchall():
+        name = (name or '').strip()
+        if not name:
+            name = f'Input {ch_num}'
+        print(name)
+    con.close()
+finally:
+    os.unlink(tmp.name)
 ]]
 
 -- ============================================================
@@ -62,7 +76,7 @@ local function find_python()
 end
 
 local function parse_input_channels(filepath)
-    local tmp = reaper.GetResourcePath() .. "/reaper_wing_parse.py"
+    local tmp = reaper.GetResourcePath() .. "/reaper_sseries_parse.py"
     local f = io.open(tmp, "w")
     if not f then return nil, "Could not write temp file" end
     f:write(PYTHON_SCRIPT)
@@ -97,7 +111,7 @@ end
 -- TRACK CREATION
 -- ============================================================
 
-local INPUT_COLOR = { r=156, g=39, b=176 }  -- Wing purple
+local INPUT_COLOR = { r=142, g=142, b=147 }  -- DiGiCo gray
 
 local function create_tracks(channels)
     local proj      = 0
@@ -122,29 +136,29 @@ local function create_tracks(channels)
     reaper.TrackList_AdjustWindows(false)
     reaper.UpdateArrange()
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("Wing: Import input channels", -1)
+    reaper.Undo_EndBlock("DiGiCo S-Series: Import input channels", -1)
 end
 
 -- ============================================================
 -- MAIN
 -- ============================================================
 
-local ok, filepath = reaper.GetUserFileNameForRead("", "Select Wing Snapshot File (.snap)", "snap")
+local ok, filepath = reaper.GetUserFileNameForRead("", "Select DiGiCo S-Series Show File (.session)", "session")
 if not ok then return end
 
 local channels, err = parse_input_channels(filepath)
 
 if not channels then
-    reaper.ShowMessageBox("Error: " .. tostring(err), "Wing to Reaper", 0)
+    reaper.ShowMessageBox("Error: " .. tostring(err), "DiGiCo S-Series to Reaper", 0)
     return
 end
 
 if #channels == 0 then
     reaper.ShowMessageBox(
-        "No input channels found.\n\nMake sure this is a Behringer Wing .snap snapshot file.",
-        "Wing to Reaper", 0)
+        "No input channels found.\n\nMake sure this is a DiGiCo S-Series show file (.session).",
+        "DiGiCo S-Series to Reaper", 0)
     return
 end
 
 create_tracks(channels)
-reaper.ShowMessageBox(string.format("Imported %d input channels.", #channels), "Wing to Reaper", 0)
+reaper.ShowMessageBox(string.format("Imported %d input channels.", #channels), "DiGiCo S-Series to Reaper", 0)

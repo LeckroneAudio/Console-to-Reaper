@@ -1,31 +1,57 @@
--- Behringer Wing to Reaper — Input Channel Importer
--- Parses a Wing .snap snapshot file and creates tracks for all Input Channels.
--- Requires Python 3 (comes with the Console to Reaper app).
+-- Yamaha DM7 to Reaper — Input Channel Importer
+-- Parses a Yamaha DM7 .dm7f project file and creates tracks for all Input Channels.
 --
 -- Installation:
 --   1. Actions > Load ReaScript, select this file
---   2. Assign shortcut: Actions > Action List → find script → Add shortcut → Cmd+Shift+W
+--   2. Assign shortcut: Actions > Action List → find script → Add shortcut
 
 -- ============================================================
 -- PYTHON PARSER (embedded — requires Python 3)
 -- ============================================================
 
 local PYTHON_SCRIPT = [[
-import sys, json
+import sys, zlib, struct
 
-with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as fh:
-    data = json.load(fh)
+with open(sys.argv[1], 'rb') as fh:
+    content = fh.read()
 
-ae = data.get('ae_data') or data
-lcl = ae.get('io', {}).get('in', {}).get('LCL', {})
+mixing_data = None
+for i in range(len(content) - 1):
+    b0, b1 = content[i], content[i + 1]
+    if b0 == 0x78 and b1 in (0x01, 0x9C, 0xDA):
+        try:
+            dec = zlib.decompress(content[i:])
+            if dec[72:90] == b'#MMS FIELD\x00\x00Mixing' and b'COL0InputChannel' in dec[:600]:
+                mixing_data = dec
+                break
+        except Exception:
+            pass
 
-for k, v in sorted(lcl.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
-    if not isinstance(v, dict):
-        continue
-    num = int(k) if k.isdigit() else 0
-    name = v.get('name', '').strip()
+if mixing_data is None:
+    sys.exit(1)
+
+col0_pos = mixing_data.find(b'COL0InputChannel')
+if col0_pos < 0:
+    sys.exit(1)
+
+inp_record_size = struct.unpack_from('<I', mixing_data, col0_pos + 40)[0]
+inp_count       = struct.unpack_from('<I', mixing_data, col0_pos + 44)[0]
+
+stereo_off = mixing_data.find(b'STEREO\x00\x00')
+if stereo_off < 0 or inp_record_size == 0:
+    sys.exit(1)
+
+inp_num = 0
+for i in range(inp_count):
+    name_off = stereo_off + 8 + i * inp_record_size
+    if name_off + 64 > len(mixing_data):
+        break
+    if mixing_data[name_off - 8:name_off] != b'STEREO\x00\x00':
+        break
+    name = mixing_data[name_off:name_off + 64].rstrip(b'\x00').decode('ascii', errors='replace').strip()
+    inp_num += 1
     if not name:
-        name = 'Ch {:02d}'.format(num)
+        name = f'Ch {inp_num:02d}'
     print(name)
 ]]
 
@@ -62,7 +88,7 @@ local function find_python()
 end
 
 local function parse_input_channels(filepath)
-    local tmp = reaper.GetResourcePath() .. "/reaper_wing_parse.py"
+    local tmp = reaper.GetResourcePath() .. "/reaper_dm7_parse.py"
     local f = io.open(tmp, "w")
     if not f then return nil, "Could not write temp file" end
     f:write(PYTHON_SCRIPT)
@@ -97,7 +123,7 @@ end
 -- TRACK CREATION
 -- ============================================================
 
-local INPUT_COLOR = { r=156, g=39, b=176 }  -- Wing purple
+local INPUT_COLOR = { r=63, g=81, b=181 }  -- DM7 indigo (distinct from Rivage blue)
 
 local function create_tracks(channels)
     local proj      = 0
@@ -122,29 +148,29 @@ local function create_tracks(channels)
     reaper.TrackList_AdjustWindows(false)
     reaper.UpdateArrange()
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("Wing: Import input channels", -1)
+    reaper.Undo_EndBlock("DM7: Import input channels", -1)
 end
 
 -- ============================================================
 -- MAIN
 -- ============================================================
 
-local ok, filepath = reaper.GetUserFileNameForRead("", "Select Wing Snapshot File (.snap)", "snap")
+local ok, filepath = reaper.GetUserFileNameForRead("", "Select Yamaha DM7 Project File (.dm7f)", "dm7f")
 if not ok then return end
 
 local channels, err = parse_input_channels(filepath)
 
 if not channels then
-    reaper.ShowMessageBox("Error: " .. tostring(err), "Wing to Reaper", 0)
+    reaper.ShowMessageBox("Error: " .. tostring(err), "DM7 to Reaper", 0)
     return
 end
 
 if #channels == 0 then
     reaper.ShowMessageBox(
-        "No input channels found.\n\nMake sure this is a Behringer Wing .snap snapshot file.",
-        "Wing to Reaper", 0)
+        "No input channels found.\n\nMake sure this is a Yamaha DM7 project file (.dm7f).",
+        "DM7 to Reaper", 0)
     return
 end
 
 create_tracks(channels)
-reaper.ShowMessageBox(string.format("Imported %d input channels.", #channels), "Wing to Reaper", 0)
+reaper.ShowMessageBox(string.format("Imported %d input channels.", #channels), "DM7 to Reaper", 0)

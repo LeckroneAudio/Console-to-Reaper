@@ -1,32 +1,51 @@
--- Behringer Wing to Reaper — Input Channel Importer
--- Parses a Wing .snap snapshot file and creates tracks for all Input Channels.
--- Requires Python 3 (comes with the Console to Reaper app).
+-- Waves LV1 to Reaper — Input Channel Importer
+-- Parses a Waves LV1 .emo session file (SQLite 3 database) and creates tracks for all Input Channels.
 --
 -- Installation:
 --   1. Actions > Load ReaScript, select this file
---   2. Assign shortcut: Actions > Action List → find script → Add shortcut → Cmd+Shift+W
+--   2. Assign shortcut: Actions > Action List → find script → Add shortcut
 
 -- ============================================================
 -- PYTHON PARSER (embedded — requires Python 3)
 -- ============================================================
 
 local PYTHON_SCRIPT = [[
-import sys, json
+import sys, sqlite3, os, tempfile
 
-with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as fh:
-    data = json.load(fh)
+with open(sys.argv[1], 'rb') as fh:
+    content = fh.read()
 
-ae = data.get('ae_data') or data
-lcl = ae.get('io', {}).get('in', {}).get('LCL', {})
+if not content.startswith(b'SQLite format 3\x00'):
+    sys.exit(1)
 
-for k, v in sorted(lcl.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
-    if not isinstance(v, dict):
-        continue
-    num = int(k) if k.isdigit() else 0
-    name = v.get('name', '').strip()
-    if not name:
-        name = 'Ch {:02d}'.format(num)
-    print(name)
+tmp_path = None
+try:
+    with tempfile.NamedTemporaryFile(suffix='.emo', delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    db = sqlite3.connect(tmp_path)
+    cur = db.cursor()
+
+    cur.execute("""
+        SELECT o.obj_index, sc.name
+        FROM snapshot_chainer sc
+        JOIN chainer c ON c.obj_id = sc.chainer_id
+        JOIN object o ON o.id = c.obj_id
+        WHERE sc.snapshot_id = -1 AND o.obj_type = 0
+        ORDER BY o.obj_index
+    """)
+    for obj_index, name in cur.fetchall():
+        name = (name or '').strip()
+        if not name:
+            name = f'Channel {obj_index + 1}'
+        print(name)
+    db.close()
+except Exception:
+    pass
+finally:
+    if tmp_path and os.path.exists(tmp_path):
+        os.remove(tmp_path)
 ]]
 
 -- ============================================================
@@ -62,7 +81,7 @@ local function find_python()
 end
 
 local function parse_input_channels(filepath)
-    local tmp = reaper.GetResourcePath() .. "/reaper_wing_parse.py"
+    local tmp = reaper.GetResourcePath() .. "/reaper_lv1_parse.py"
     local f = io.open(tmp, "w")
     if not f then return nil, "Could not write temp file" end
     f:write(PYTHON_SCRIPT)
@@ -97,7 +116,7 @@ end
 -- TRACK CREATION
 -- ============================================================
 
-local INPUT_COLOR = { r=156, g=39, b=176 }  -- Wing purple
+local INPUT_COLOR = { r=211, g=47, b=47 }  -- Waves red
 
 local function create_tracks(channels)
     local proj      = 0
@@ -122,29 +141,29 @@ local function create_tracks(channels)
     reaper.TrackList_AdjustWindows(false)
     reaper.UpdateArrange()
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("Wing: Import input channels", -1)
+    reaper.Undo_EndBlock("LV1: Import input channels", -1)
 end
 
 -- ============================================================
 -- MAIN
 -- ============================================================
 
-local ok, filepath = reaper.GetUserFileNameForRead("", "Select Wing Snapshot File (.snap)", "snap")
+local ok, filepath = reaper.GetUserFileNameForRead("", "Select Waves LV1 Session File (.emo)", "emo")
 if not ok then return end
 
 local channels, err = parse_input_channels(filepath)
 
 if not channels then
-    reaper.ShowMessageBox("Error: " .. tostring(err), "Wing to Reaper", 0)
+    reaper.ShowMessageBox("Error: " .. tostring(err), "LV1 to Reaper", 0)
     return
 end
 
 if #channels == 0 then
     reaper.ShowMessageBox(
-        "No input channels found.\n\nMake sure this is a Behringer Wing .snap snapshot file.",
-        "Wing to Reaper", 0)
+        "No input channels found.\n\nMake sure this is a Waves LV1 session file (.emo).",
+        "LV1 to Reaper", 0)
     return
 end
 
 create_tracks(channels)
-reaper.ShowMessageBox(string.format("Imported %d input channels.", #channels), "Wing to Reaper", 0)
+reaper.ShowMessageBox(string.format("Imported %d input channels.", #channels), "LV1 to Reaper", 0)

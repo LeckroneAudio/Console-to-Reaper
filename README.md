@@ -7,10 +7,20 @@ INSTALLATION:
 3. Look for the 🎛️ icon in your menu bar (top-right of screen)
 
 SUPPORTED CONSOLES:
-- DiGiCo — export a Session Report (.rtf) from the console
-  Make sure to include Channels when printing the report
+- DiGiCo SD/Quantum — export a Session Report (.rtf) from the console
+  (make sure to include Channels when printing the report), or copy the
+  .ses show file directly, or pull channels live over OSC
+- DiGiCo S-Series — copy the .session file from the console or S-Series software
 - Yamaha Rivage PM — export a show file (.RIVAGEPM) from Rivage PM Manager
-- Allen & Heath dLive — export a show file (.tar.gz) from dLive Director
+- Yamaha DM7 — copy the .dm7f project file from the console
+- Allen & Heath dLive / Avantis — export a show file (.tar.gz) from dLive/Avantis Director
+- Allen & Heath SQ — export a scene from SQ-MixPad or save to USB (.dat)
+- Behringer X32 / Midas M32 — save a scene from the console or X32-Edit/M32-Edit (.scn)
+- Behringer Wing — save a snapshot from the console or Wing-Edit (.snap)
+- Avid S6L / VENUE — save a show file from the console or VENUE software (.dsh)
+  NOT FULLY SUPPORTED: Input and Aux/Bus channels only. Group and Matrix
+  outputs are not extracted from S6L show files.
+- Waves LV1 — save a session file from LV1 software (.emo)
 
 USAGE:
 1. Export a show file from your console (see Supported Consoles above)
@@ -96,25 +106,40 @@ MENU BAR OPTIONS:
 - Quit — properly closes the app and stops the server
 
 LUA SCRIPTS (OPTIONAL — REAPER DIRECT IMPORT):
-Three ReaScripts are included in the .zip for importing input channels directly
-into Reaper without using the converter app or browser at all.
+ReaScripts are included in the .zip for importing directly into Reaper
+without using the converter app or browser at all — one per console, plus
+DiGiCo has extra options.
 
-  DiGiCo_to_Reaper.lua    — imports from a DiGiCo .rtf session report
-  Rivage_to_Reaper.lua    — imports from a Yamaha Rivage PM .RIVAGEPM show file
-  dLive_to_Reaper.lua     — imports from an A&H dLive .tar.gz show file
+  DiGiCo_to_Reaper_Full.lua       — DiGiCo SD/Quantum (.ses or .rtf), all
+                                     sections (Inputs/Aux/Groups/Matrix)
+                                     with an interactive channel selector
+  DiGiCo_to_Reaper.lua            — DiGiCo SD/Quantum (.rtf), Input Channels only
+  DiGiCo_OSC_to_Reaper.lua        — DiGiCo SD/Quantum, live import over OSC
+  DiGiCo_OSC_Settings.lua         — configures the OSC connection used above
+  DiGiCo_S_Series_to_Reaper.lua   — DiGiCo S-Series (.session), Input Channels only
+  Rivage_to_Reaper.lua            — Yamaha Rivage PM (.RIVAGEPM), Input Channels only
+  DM7_to_Reaper.lua               — Yamaha DM7 (.dm7f), Input Channels only
+  dLive_to_Reaper.lua             — A&H dLive/Avantis (.tar.gz), Input Channels only
+  SQ_to_Reaper.lua                — A&H SQ (.dat), Input Channels only
+  M32_to_Reaper.lua               — Behringer X32 / Midas M32 (.scn), Input Channels only
+  Wing_to_Reaper.lua              — Behringer Wing (.snap), Input Channels only
+  S6L_to_Reaper.lua               — Avid S6L / VENUE (.dsh), Input Channels only
+  LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only
 
-What each script does:
-- Prompts you to select the appropriate show file
-- Parses all Input Channels from the file
-- Creates one track per channel (stereo channels split into L/R mono tracks)
-- Assigns sequential hardware inputs
-- Colors tracks by console (DiGiCo: gray, Rivage: blue, dLive: green)
+What the single-console scripts do (all except DiGiCo_to_Reaper_Full.lua):
+- Prompt you to select the appropriate show file
+- Parse all Input Channels from the file
+- Create one track per channel (stereo channels split into L/R mono tracks)
+- Assign sequential hardware inputs
+- Color tracks by console
 
-Note: The Lua scripts only import Input Channels. They do not support Aux,
+Note: These scripts only import Input Channels. They do not support Aux,
 Group, or Matrix outputs, custom colors, stereo-keep mode, or CSV export.
-For full control over your session, use the converter app instead.
+For full control over any session (or for DiGiCo Aux/Group/Matrix), use
+DiGiCo_to_Reaper_Full.lua or the converter app instead.
 
-Note: Rivage_to_Reaper.lua and dLive_to_Reaper.lua require Python 3 to be
+Note: Every script except DiGiCo_to_Reaper.lua, DiGiCo_to_Reaper_Full.lua,
+DiGiCo_OSC_to_Reaper.lua, and M32_to_Reaper.lua requires Python 3 to be
 installed on your system (included automatically if you have the converter app).
 
 SETTING UP THE LUA SCRIPTS IN REAPER:

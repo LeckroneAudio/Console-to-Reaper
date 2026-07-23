@@ -1,31 +1,42 @@
--- Behringer Wing to Reaper — Input Channel Importer
--- Parses a Wing .snap snapshot file and creates tracks for all Input Channels.
--- Requires Python 3 (comes with the Console to Reaper app).
+-- Allen & Heath SQ to Reaper — Input Channel Importer
+-- Parses an A&H SQ scene .DAT file and creates tracks for all Input Channels.
 --
 -- Installation:
 --   1. Actions > Load ReaScript, select this file
---   2. Assign shortcut: Actions > Action List → find script → Add shortcut → Cmd+Shift+W
+--   2. Assign shortcut: Actions > Action List → find script → Add shortcut
 
 -- ============================================================
 -- PYTHON PARSER (embedded — requires Python 3)
 -- ============================================================
 
 local PYTHON_SCRIPT = [[
-import sys, json
+import sys
 
-with open(sys.argv[1], 'r', encoding='utf-8', errors='ignore') as fh:
-    data = json.load(fh)
+with open(sys.argv[1], 'rb') as fh:
+    content = fh.read()
 
-ae = data.get('ae_data') or data
-lcl = ae.get('io', {}).get('in', {}).get('LCL', {})
+if len(content) != 131072 or content[:2] != b'\xa1\x00':
+    sys.exit(1)
 
-for k, v in sorted(lcl.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 999):
-    if not isinstance(v, dict):
-        continue
-    num = int(k) if k.isdigit() else 0
-    name = v.get('name', '').strip()
-    if not name:
-        name = 'Ch {:02d}'.format(num)
+RECORD_OFFSET = 880
+RECORD_STRIDE = 336
+
+def read_name(rec_idx):
+    off = RECORD_OFFSET + rec_idx * RECORD_STRIDE + 4
+    raw = content[off:off + 8]
+    null = raw.find(0)
+    try:
+        return raw[:null if null >= 0 else 8].decode('ascii').strip()
+    except UnicodeDecodeError:
+        return ''
+
+input_n = 0
+for i in range(48):
+    in_stereo_zone = (i >= 40)
+    if in_stereo_zone and i % 2 == 1:
+        continue  # R side of stereo pair — skip
+    input_n += 1
+    name = read_name(i) or f'Input {input_n}'
     print(name)
 ]]
 
@@ -62,7 +73,7 @@ local function find_python()
 end
 
 local function parse_input_channels(filepath)
-    local tmp = reaper.GetResourcePath() .. "/reaper_wing_parse.py"
+    local tmp = reaper.GetResourcePath() .. "/reaper_sq_parse.py"
     local f = io.open(tmp, "w")
     if not f then return nil, "Could not write temp file" end
     f:write(PYTHON_SCRIPT)
@@ -97,7 +108,7 @@ end
 -- TRACK CREATION
 -- ============================================================
 
-local INPUT_COLOR = { r=156, g=39, b=176 }  -- Wing purple
+local INPUT_COLOR = { r=0, g=150, b=136 }  -- A&H teal
 
 local function create_tracks(channels)
     local proj      = 0
@@ -122,29 +133,29 @@ local function create_tracks(channels)
     reaper.TrackList_AdjustWindows(false)
     reaper.UpdateArrange()
     reaper.PreventUIRefresh(-1)
-    reaper.Undo_EndBlock("Wing: Import input channels", -1)
+    reaper.Undo_EndBlock("SQ: Import input channels", -1)
 end
 
 -- ============================================================
 -- MAIN
 -- ============================================================
 
-local ok, filepath = reaper.GetUserFileNameForRead("", "Select Wing Snapshot File (.snap)", "snap")
+local ok, filepath = reaper.GetUserFileNameForRead("", "Select A&H SQ Scene File (.dat)", "dat")
 if not ok then return end
 
 local channels, err = parse_input_channels(filepath)
 
 if not channels then
-    reaper.ShowMessageBox("Error: " .. tostring(err), "Wing to Reaper", 0)
+    reaper.ShowMessageBox("Error: " .. tostring(err), "SQ to Reaper", 0)
     return
 end
 
 if #channels == 0 then
     reaper.ShowMessageBox(
-        "No input channels found.\n\nMake sure this is a Behringer Wing .snap snapshot file.",
-        "Wing to Reaper", 0)
+        "No input channels found.\n\nMake sure this is an A&H SQ scene file (.dat).",
+        "SQ to Reaper", 0)
     return
 end
 
 create_tracks(channels)
-reaper.ShowMessageBox(string.format("Imported %d input channels.", #channels), "Wing to Reaper", 0)
+reaper.ShowMessageBox(string.format("Imported %d input channels.", #channels), "SQ to Reaper", 0)

@@ -8,22 +8,37 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import io
 import json
 import os
+import platform
 import re
 import struct
 import subprocess
+import sys
 import tarfile
 import uuid
 import socket
 import threading
+import webbrowser
 import zlib
 from urllib.parse import parse_qs
 
-try:
-    import rumps
-except ImportError:
-    print("Installing rumps...")
-    subprocess.run(['pip3', 'install', 'rumps', '--break-system-packages'], check=True)
-    import rumps
+IS_MAC = platform.system() == 'Darwin'
+
+if IS_MAC:
+    try:
+        import rumps
+    except ImportError:
+        print("Installing rumps...")
+        subprocess.run([sys.executable, '-m', 'pip', 'install', 'rumps', '--break-system-packages'], check=True)
+        import rumps
+else:
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+    except ImportError:
+        print("Installing pystray + Pillow...")
+        subprocess.run([sys.executable, '-m', 'pip', 'install', 'pystray', 'Pillow'], check=True)
+        import pystray
+        from PIL import Image, ImageDraw
 
 def parse_digico_rtf(rtf_content):
     """Parse DiGiCo RTF session report and extract all channel sections"""
@@ -3979,8 +3994,8 @@ class ConsoleToReaperApp(rumps.App):
     def open_browser(self, _):
         """Open the converter in default browser"""
         if self.port:
-            subprocess.Popen(['open', f'http://localhost:{self.port}'])
-    
+            webbrowser.open(f'http://localhost:{self.port}')
+
     def restart_server(self, _):
         """Restart the server"""
         if self.server:
@@ -4008,5 +4023,96 @@ class ConsoleToReaperApp(rumps.App):
         rumps.quit_application()
 
 
+def _make_tray_icon_image():
+    """Placeholder tray icon (three mixer-fader bars) — swap for a real .ico/.png asset later"""
+    size = 64
+    img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    bar_w, gap, heights = 10, 8, (40, 52, 34)
+    x0 = (size - (bar_w * 3 + gap * 2)) // 2
+    for i, h in enumerate(heights):
+        x = x0 + i * (bar_w + gap)
+        draw.rounded_rectangle([x, size - 8 - h, x + bar_w, size - 8], radius=3, fill=(0, 122, 255, 255))
+    return img
+
+
+class ConsoleToReaperTrayApp:
+    """Windows/Linux system-tray front end (pystray), mirrors ConsoleToReaperApp"""
+
+    def __init__(self):
+        self.server = None
+        self.server_thread = None
+        self.port = None
+        self.icon = pystray.Icon(
+            'console_to_reaper',
+            _make_tray_icon_image(),
+            'Console to Reaper',
+            menu=pystray.Menu(
+                pystray.MenuItem("Open Converter", self.open_browser, default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Restart Server", self.restart_server),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", self.quit_app),
+            ),
+        )
+
+    def start_server(self):
+        """Start the HTTP server in a background thread"""
+        self.port = find_available_port(8081)
+
+        if self.port is None:
+            print("Could not find an available port (8081-8090 all in use).")
+            self.icon.stop()
+            return
+
+        self.server = ThreadingHTTPServer(('localhost', self.port), DiGiCoToReaperHandler)
+
+        # Run server in background thread
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+
+        self.icon.title = f'Console to Reaper — :{self.port}'
+        print(f"✅ Server running on http://localhost:{self.port}")
+
+        # Auto-open browser on first launch
+        self.open_browser()
+
+    def open_browser(self, icon=None, item=None):
+        """Open the converter in default browser"""
+        if self.port:
+            webbrowser.open(f'http://localhost:{self.port}')
+
+    def restart_server(self, icon=None, item=None):
+        """Restart the server"""
+        if self.server:
+            self.server.shutdown()
+            self.server_thread.join(timeout=2)
+
+        self._notify("Restarting server...")
+        self.start_server()
+        self._notify(f"Server restarted on port {self.port}")
+
+    def quit_app(self, icon=None, item=None):
+        """Quit the application"""
+        if self.server:
+            self.server.shutdown()
+        self.icon.stop()
+
+    def _notify(self, message, title="Console to Reaper"):
+        try:
+            self.icon.notify(message, title)
+        except Exception:
+            pass  # not every backend (e.g. some Linux DEs) supports notifications
+
+    def run(self):
+        def _setup(icon):
+            icon.visible = True
+            self.start_server()
+        self.icon.run(setup=_setup)
+
+
 if __name__ == "__main__":
-    ConsoleToReaperApp().run()
+    if IS_MAC:
+        ConsoleToReaperApp().run()
+    else:
+        ConsoleToReaperTrayApp().run()

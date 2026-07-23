@@ -337,26 +337,35 @@ local function ask_settings(ip, sp, lp)
     return parts[1] or ip, parts[2] or sp, parts[3] or lp
 end
 
+local function is_windows()
+    local os_str = reaper.GetOS and reaper.GetOS() or ""
+    return os_str:find("Win") ~= nil
+end
+
 -- Try fetching through the Console to Reaper app's local web server.
 -- When the app is running, its OSC engine (the canonical implementation)
 -- does the console conversation and returns the same TSV this script
 -- parses. Returns TSV text, or nil if the app isn't reachable.
 local function app_fetch(ip, sp, lp)
+    local null_redirect = is_windows() and "2>NUL" or "2>/dev/null"
     local safe_ip = ip:gsub('[^%w%.%-]', '')
     local safe_sp = tostring(tonumber(sp) or 8012)
     local safe_lp = tostring(tonumber(lp) or 8011)
     for port = 8081, 8090 do
         local h = io.popen(string.format(
-            'curl -s --connect-timeout 1 http://127.0.0.1:%d/heartbeat 2>/dev/null', port), "r")
+            'curl -s --connect-timeout 1 http://127.0.0.1:%d/heartbeat %s', port, null_redirect), "r")
         local beat = h and h:read("*all") or ""
         if h then h:close() end
         if beat:find('"status"', 1, true) then
+            -- Double-quote + backslash-escape: valid argument quoting for
+            -- both POSIX sh and Windows cmd.exe/curl.exe, unlike single
+            -- quotes (which cmd.exe passes through literally into the arg).
             local payload = string.format(
-                '{"ip":"%s","send_port":%s,"listen_port":%s,"format":"tsv"}',
+                '{\\"ip\\":\\"%s\\",\\"send_port\\":%s,\\"listen_port\\":%s,\\"format\\":\\"tsv\\"}',
                 safe_ip, safe_sp, safe_lp)
             local f = io.popen(string.format(
-                "curl -s -m 30 -X POST -H 'Content-Type: application/json' --data '%s' " ..
-                "http://127.0.0.1:%d/osc_fetch 2>/dev/null", payload, port), "r")
+                'curl -s -m 30 -X POST -H "Content-Type: application/json" --data "%s" ' ..
+                'http://127.0.0.1:%d/osc_fetch %s', payload, port, null_redirect), "r")
             local out = f and f:read("*all") or ""
             if f then f:close() end
             if out:sub(1, 5) == "meta\t" or out:sub(1, 6) == "error\t" then
@@ -372,7 +381,17 @@ end
 -- sync by sync_embedded_fetcher.py). Returns raw TSV output ("" = no
 -- response), or nil on a local problem that was already reported.
 local function run_fetch_embedded(ip, sp, lp)
-    local tmp = os.tmpname() .. ".py"
+    local win = is_windows()
+
+    local tmp
+    if win then
+        -- os.tmpname() can hand back a path outside a writable dir on
+        -- Windows; build one from %TEMP% instead.
+        local tmpdir = os.getenv("TEMP") or os.getenv("TMP") or "."
+        tmp = string.format("%s\\digico_osc_fetch_%d.py", tmpdir, math.random(100000, 999999))
+    else
+        tmp = os.tmpname() .. ".py"
+    end
     local f = io.open(tmp, "w")
     if not f then
         reaper.ShowMessageBox("Could not write temp file.", "DiGiCo OSC", 0)
@@ -380,46 +399,76 @@ local function run_fetch_embedded(ip, sp, lp)
     end
     f:write(PYFETCH); f:close()
 
-    -- Find a Python interpreter. Prefer the one bundled inside the
-    -- Console/DiGiCo to Reaper app (py2app ships a full Python3), so app
-    -- users need nothing extra; fall back to python3 on the PATH.
+    -- Find a Python interpreter.
     local py_prefix = nil
-    for _, app in ipairs({
-        "/Applications/DiGiCo to Reaper.app",
-        "/Applications/Console to Reaper.app",
-    }) do
-        local stub = app .. "/Contents/MacOS/python"
-        local fh = io.open(stub, "rb")
-        if fh then
-            fh:close()
-            py_prefix = string.format(
-                'DYLD_LIBRARY_PATH="%s/Contents/Frameworks/Python3.framework" ' ..
-                'PYTHONHOME="%s/Contents/Resources" "%s"', app, app, stub)
-            break
-        end
-    end
-    if not py_prefix then
-        local chk = io.popen('command -v python3 2>/dev/null', "r")
+    if win then
+        -- No py2app-style bundled interpreter stub on Windows (PyInstaller
+        -- doesn't expose one the same way); use the `py` launcher (ships
+        -- with the official python.org installer), then `python` on PATH.
+        local chk = io.popen('where py 2>NUL', "r")
         local py = chk and chk:read("*l") or nil
         if chk then chk:close() end
         if py and py ~= "" then
-            py_prefix = "python3"
+            py_prefix = "py -3"
+        else
+            chk = io.popen('where python 2>NUL', "r")
+            py = chk and chk:read("*l") or nil
+            if chk then chk:close() end
+            if py and py ~= "" then
+                py_prefix = "python"
+            end
+        end
+    else
+        -- Prefer the one bundled inside the Console/DiGiCo to Reaper app
+        -- (py2app ships a full Python3), so app users need nothing extra;
+        -- fall back to python3 on the PATH.
+        for _, app in ipairs({
+            "/Applications/DiGiCo to Reaper.app",
+            "/Applications/Console to Reaper.app",
+        }) do
+            local stub = app .. "/Contents/MacOS/python"
+            local fh = io.open(stub, "rb")
+            if fh then
+                fh:close()
+                py_prefix = string.format(
+                    'DYLD_LIBRARY_PATH="%s/Contents/Frameworks/Python3.framework" ' ..
+                    'PYTHONHOME="%s/Contents/Resources" "%s"', app, app, stub)
+                break
+            end
+        end
+        if not py_prefix then
+            local chk = io.popen('command -v python3 2>/dev/null', "r")
+            local py = chk and chk:read("*l") or nil
+            if chk then chk:close() end
+            if py and py ~= "" then
+                py_prefix = "python3"
+            end
         end
     end
     if not py_prefix then
         os.remove(tmp)
-        reaper.ShowMessageBox(
-            "No Python interpreter found.\n\n" ..
-            "Either install the Console to Reaper app, or install the\n" ..
-            "Xcode Command Line Tools by running this in Terminal:\n\n" ..
-            "    xcode-select --install",
-            "DiGiCo OSC", 0)
+        if win then
+            reaper.ShowMessageBox(
+                "No Python interpreter found.\n\n" ..
+                "Either install the Console to Reaper app, or install\n" ..
+                "Python from python.org (check \"Add python.exe to PATH\"\n" ..
+                "during setup).",
+                "DiGiCo OSC", 0)
+        else
+            reaper.ShowMessageBox(
+                "No Python interpreter found.\n\n" ..
+                "Either install the Console to Reaper app, or install the\n" ..
+                "Xcode Command Line Tools by running this in Terminal:\n\n" ..
+                "    xcode-select --install",
+                "DiGiCo OSC", 0)
+        end
         return nil
     end
 
+    local null_redirect = win and "2>NUL" or "2>/dev/null"
     local cmd = string.format(
-        '%s "%s" %s --send-port %s --listen-port %s --tsv 2>/dev/null',
-        py_prefix, tmp, ip, sp, lp)
+        '%s "%s" %s --send-port %s --listen-port %s --tsv %s',
+        py_prefix, tmp, ip, sp, lp, null_redirect)
     local ph = io.popen(cmd, "r")
     local out = ph and ph:read("*all") or nil
     if ph then ph:close() end

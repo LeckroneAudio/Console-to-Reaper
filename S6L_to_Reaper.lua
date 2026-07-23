@@ -43,6 +43,34 @@ for m in strip_name_pat.finditer(data):
 -- PARSING — shells to Python
 -- ============================================================
 
+local function is_windows()
+    local os_str = reaper.GetOS and reaper.GetOS() or ""
+    return os_str:find("Win") ~= nil
+end
+
+-- Find a Python 3 interpreter: `py -3`/`python` on Windows, `python3` on
+-- macOS/Linux. Returns nil if none found.
+local function find_python()
+    if is_windows() then
+        local chk = io.popen('where py 2>NUL', "r")
+        local py = chk and chk:read("*l") or nil
+        if chk then chk:close() end
+        if py and py ~= "" then return "py -3" end
+
+        chk = io.popen('where python 2>NUL', "r")
+        py = chk and chk:read("*l") or nil
+        if chk then chk:close() end
+        if py and py ~= "" then return "python" end
+        return nil
+    else
+        local chk = io.popen('command -v python3 2>/dev/null', "r")
+        local py = chk and chk:read("*l") or nil
+        if chk then chk:close() end
+        if py and py ~= "" then return "python3" end
+        return nil
+    end
+end
+
 local function parse_input_channels(filepath)
     local tmp = reaper.GetResourcePath() .. "/reaper_s6l_parse.py"
     local f = io.open(tmp, "w")
@@ -50,7 +78,15 @@ local function parse_input_channels(filepath)
     f:write(PYTHON_SCRIPT)
     f:close()
 
-    local cmd = string.format('python3 "%s" "%s" 2>/dev/null', tmp, filepath)
+    local py = find_python()
+    if not py then
+        os.remove(tmp)
+        return nil, "No Python 3 interpreter found. Install Python 3 " ..
+            "(python.org on Windows, or run 'xcode-select --install' on macOS)."
+    end
+
+    local null_redirect = is_windows() and "2>NUL" or "2>/dev/null"
+    local cmd = string.format('%s "%s" "%s" %s', py, tmp, filepath, null_redirect)
     local pipe = io.popen(cmd)
     if not pipe then
         os.remove(tmp)
