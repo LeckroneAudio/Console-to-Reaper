@@ -85,7 +85,6 @@ Use the stereo toggle to choose how stereo channels are exported:
 
 REAPER TRACK SETTINGS:
 All exported tracks are:
-- Record armed and ready to receive input
 - Routed sequentially to hardware inputs (mono channels take one input, stereo channels take two)
 - Colored according to any colors you assigned
 
@@ -96,9 +95,6 @@ EXPORT OPTIONS:
 UNDO:
 - Click the Undo button (or use your browser's standard undo if available) to step back through changes
 - Up to 50 undo steps are stored per session
-
-DARK MODE:
-Click the "Dark Mode" button in the top-right corner to switch the interface to a dark background.
 
 MENU BAR OPTIONS:
 - Open Converter — opens the converter in your default browser

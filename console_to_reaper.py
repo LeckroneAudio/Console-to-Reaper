@@ -1745,6 +1745,97 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             transition: background 0.15s, color 0.15s;
         }
         .tab-add:hover { background: #f2f2f7; color: #007aff; border-color: #007aff; }
+        .tab-bar-row {
+            display: flex;
+            align-items: flex-end;
+            gap: 12px;
+        }
+        .instructions-tab-btn {
+            flex-shrink: 0;
+            margin-bottom: 6px;
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid #e5e5ea;
+            background: #f9f9f9;
+            color: #1d1d1f;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            white-space: nowrap;
+            transition: background 0.15s, border-color 0.15s, color 0.15s;
+        }
+        .instructions-tab-btn:hover { background: #f2f2f7; border-color: #007aff; color: #007aff; }
+        .instructions-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            align-items: flex-start;
+            justify-content: center;
+            padding: 60px 20px;
+        }
+        .instructions-overlay.open { display: flex; }
+        .instructions-modal {
+            background: white;
+            border-radius: 12px;
+            max-width: 760px;
+            width: 100%;
+            max-height: 80vh;
+            overflow-y: auto;
+            padding: 40px;
+            position: relative;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+        }
+        .instructions-close {
+            position: sticky;
+            top: 0;
+            float: right;
+            background: #f2f2f7;
+            border: none;
+            border-radius: 50%;
+            width: 32px;
+            height: 32px;
+            font-size: 16px;
+            cursor: pointer;
+            color: #86868b;
+        }
+        .instructions-close:hover { background: #ffdddd; color: #c7251a; }
+        .instructions-content h1 {
+            font-size: 26px;
+            margin-bottom: 20px;
+            color: #1d1d1f;
+        }
+        .instructions-content h2 {
+            font-size: 19px;
+            margin: 26px 0 10px;
+            color: #1d1d1f;
+        }
+        .instructions-content h2:first-of-type { margin-top: 0; }
+        .instructions-content p, .instructions-content li {
+            font-size: 14px;
+            line-height: 1.6;
+            color: #3a3a3c;
+        }
+        .instructions-content ul, .instructions-content ol {
+            margin: 6px 0 6px 20px;
+        }
+        .instructions-content code {
+            background: #f2f2f7;
+            padding: 1px 5px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        .instructions-content .lua-list {
+            font-family: -apple-system, monospace;
+            font-size: 13px;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            background: #f9f9f9;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin: 10px 0;
+        }
         .upload-area {
             border: 3px dashed #d2d2d7;
             border-radius: 12px;
@@ -2287,7 +2378,165 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             <a href="mailto:leckroneaudio@gmail.com">leckroneaudio@gmail.com</a>
         </div>
         
-        <div class="tab-bar" id="tabBar"></div>
+        <div class="tab-bar-row">
+            <button class="instructions-tab-btn" onclick="openInstructions()">📖 Instructions</button>
+            <div class="tab-bar" id="tabBar"></div>
+        </div>
+
+        <div class="instructions-overlay" id="instructionsOverlay" onclick="if (event.target === this) closeInstructions()">
+            <div class="instructions-modal">
+                <button class="instructions-close" onclick="closeInstructions()" title="Close">✕</button>
+                <div class="instructions-content">
+                    <h1>Console to Reaper — Instructions</h1>
+
+                    <h2>Supported Consoles</h2>
+                    <ul>
+                        <li><strong>DiGiCo SD/Quantum</strong> — export a Session Report (.rtf) from the console (make sure to include Channels when printing the report), or copy the .ses show file directly, or pull channels live over OSC</li>
+                        <li><strong>DiGiCo S-Series</strong> — copy the .session file from the console or S-Series software</li>
+                        <li><strong>Yamaha Rivage PM</strong> — export a show file (.RIVAGEPM) from Rivage PM Manager</li>
+                        <li><strong>Yamaha DM7</strong> — copy the .dm7f project file from the console</li>
+                        <li><strong>Allen &amp; Heath dLive / Avantis</strong> — export a show file (.tar.gz) from dLive/Avantis Director</li>
+                        <li><strong>Allen &amp; Heath SQ</strong> — export a scene from SQ-MixPad or save to USB (.dat)</li>
+                        <li><strong>Behringer X32 / Midas M32</strong> — save a scene from the console or X32-Edit/M32-Edit (.scn)</li>
+                        <li><strong>Behringer Wing</strong> — save a snapshot from the console or Wing-Edit (.snap)</li>
+                        <li><strong>Avid S6L / VENUE</strong> — save a show file from the console or VENUE software (.dsh). <em>Not fully supported: Input and Aux/Bus channels only — Group and Matrix outputs are not extracted.</em></li>
+                        <li><strong>Waves LV1</strong> — save a session file from LV1 software (.emo)</li>
+                    </ul>
+
+                    <h2>Usage</h2>
+                    <ol>
+                        <li>Export a show file from your console (see Supported Consoles above)</li>
+                        <li>Upload your show file using the upload area, or add channels manually</li>
+                        <li>Select/deselect channels and organize as needed</li>
+                        <li>Choose your stereo mode and click Download</li>
+                        <li>Import into Reaper: Track → Insert tracks from template → Select file, or drag the .RTrackTemplate file directly into Reaper</li>
+                    </ol>
+
+                    <h2>Sessions (Tabs)</h2>
+                    <p>The converter supports multiple sessions open at once using tabs.</p>
+                    <ul>
+                        <li>Click "+" to add a new session tab</li>
+                        <li>Double-click a tab name to rename it</li>
+                        <li>Click the × on a tab to close it</li>
+                        <li>Each tab is fully independent — channels, colors, and selections do not carry over between tabs</li>
+                    </ul>
+
+                    <h2>Uploading Files</h2>
+                    <ul>
+                        <li>Drag and drop a show file onto the upload area, or click to browse</li>
+                        <li>To load a new file into an existing session, click "Upload New File" — you will be prompted before the session is cleared</li>
+                        <li>If no file is loaded, you can still build a session by adding channels manually</li>
+                    </ul>
+
+                    <h2>Adding and Editing Channels</h2>
+                    <ul>
+                        <li>Click "+ Add Channel Manually" to add channels that aren't in your session report</li>
+                        <li>Choose the channel type (Input, Aux, Group, Matrix), name, quantity, and whether it's stereo</li>
+                        <li>Double-click any channel name to rename it inline</li>
+                        <li>Use the Up/Down arrow keys while renaming to move to the next or previous channel</li>
+                        <li>Click the ✕ on any channel row to remove it immediately</li>
+                        <li>Select one or more channels and press Delete (or Backspace on Windows) to remove with confirmation</li>
+                    </ul>
+
+                    <h2>Selecting Channels</h2>
+                    <ul>
+                        <li>Click any channel row to highlight it</li>
+                        <li>Cmd/Ctrl+Click to toggle individual channels on/off</li>
+                        <li>Shift+Click to select a range</li>
+                        <li>Cmd/Ctrl+A to select all</li>
+                        <li>Click empty space in the list to deselect all</li>
+                    </ul>
+
+                    <h2>Reordering Channels</h2>
+                    <ul>
+                        <li>Drag any channel row to reorder it</li>
+                        <li>Drag a highlighted channel to move all highlighted channels together as a group</li>
+                        <li>The list will scroll automatically when dragging near the top or bottom</li>
+                    </ul>
+
+                    <h2>Quick Selections</h2>
+                    <p>Each section (Inputs, Aux Outputs, Group Outputs, Matrix Outputs) has a checkbox to quickly include or exclude the entire section from the export.</p>
+
+                    <h2>Channel Colors</h2>
+                    <ul>
+                        <li>Click the color dot on any channel row to assign a color that will appear on the track in Reaper</li>
+                        <li>Right-click the dot (or click ✕) to clear the color</li>
+                        <li>Click the color dot next to a section label to apply one color to every channel in that section</li>
+                        <li>When multiple channels are highlighted, setting or clearing a color applies to all highlighted channels at once, and a bulk toolbar appears for the same purpose</li>
+                        <li>Stereo channels (split into L/R) will both receive the same color</li>
+                        <li>Section colors reset to default when a new file is loaded</li>
+                    </ul>
+
+                    <h2>Stereo Mode</h2>
+                    <p>Use the stereo toggle to choose how stereo channels are exported:</p>
+                    <ul>
+                        <li><strong>Split into Mono</strong> — each stereo channel becomes two separate mono tracks (L and R)</li>
+                        <li><strong>Keep as Stereo</strong> — each stereo channel becomes one stereo track</li>
+                    </ul>
+
+                    <h2>Reaper Track Settings</h2>
+                    <p>All exported tracks are routed sequentially to hardware inputs (mono channels take one input, stereo channels take two), and colored according to any colors you assigned.</p>
+
+                    <h2>Export Options</h2>
+                    <ul>
+                        <li><strong>Download .RTrackTemplate</strong> — imports directly into Reaper as a track template</li>
+                        <li><strong>Export as CSV</strong> — saves the channel list as a .csv file for use in spreadsheets or other tools</li>
+                    </ul>
+
+                    <h2>Undo</h2>
+                    <p>Click the Undo button (or use your browser's standard undo if available) to step back through changes. Up to 50 undo steps are stored per session.</p>
+
+                    <div class="desktop-only-instructions">
+                        <h2>Menu Bar Options</h2>
+                        <ul>
+                            <li><strong>Open Converter</strong> — opens the converter in your default browser</li>
+                            <li><strong>Restart Server</strong> — restarts the local server if something goes wrong</li>
+                            <li><strong>Quit</strong> — properly closes the app and stops the server</li>
+                        </ul>
+                    </div>
+
+                    <h2>Reaper Lua Scripts (Optional Direct Import)</h2>
+                    <p>ReaScripts are available for importing directly into Reaper without using the converter at all — one per console, plus DiGiCo has extra options.</p>
+                    <div class="lua-list">DiGiCo_to_Reaper_Full.lua       — DiGiCo SD/Quantum (.ses or .rtf), all
+                                 sections (Inputs/Aux/Groups/Matrix)
+                                 with an interactive channel selector
+DiGiCo_to_Reaper.lua            — DiGiCo SD/Quantum (.rtf), Input Channels only
+DiGiCo_OSC_to_Reaper.lua        — DiGiCo SD/Quantum, live import over OSC
+DiGiCo_OSC_Settings.lua         — configures the OSC connection used above
+DiGiCo_S_Series_to_Reaper.lua   — DiGiCo S-Series (.session), Input Channels only
+Rivage_to_Reaper.lua            — Yamaha Rivage PM (.RIVAGEPM), Input Channels only
+DM7_to_Reaper.lua               — Yamaha DM7 (.dm7f), Input Channels only
+dLive_to_Reaper.lua             — A&H dLive/Avantis (.tar.gz), Input Channels only
+SQ_to_Reaper.lua                — A&H SQ (.dat), Input Channels only
+M32_to_Reaper.lua               — Behringer X32 / Midas M32 (.scn), Input Channels only
+Wing_to_Reaper.lua              — Behringer Wing (.snap), Input Channels only
+S6L_to_Reaper.lua               — Avid S6L / VENUE (.dsh), Input Channels only
+LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
+                    <p>The single-console scripts (all except DiGiCo_to_Reaper_Full.lua) prompt you to select a show file, parse all Input Channels, create one track per channel (stereo split to L/R), assign sequential hardware inputs, and color tracks by console. They only import Input Channels — no Aux, Group, or Matrix outputs, custom colors, stereo-keep mode, or CSV export. For full control, use DiGiCo_to_Reaper_Full.lua or the converter instead.</p>
+                    <p>Every script except DiGiCo_to_Reaper.lua, DiGiCo_to_Reaper_Full.lua, DiGiCo_OSC_to_Reaper.lua, and M32_to_Reaper.lua requires Python 3 to be installed on your system.</p>
+                    <p><strong>Setting up a Lua script in Reaper:</strong> Actions → Load ReaScript → select the .lua file for your console. It's added to your Action List — run it from there, and optionally assign a keyboard shortcut via "Add shortcut."</p>
+
+                    <div class="desktop-only-instructions">
+                        <h2>Troubleshooting</h2>
+                        <ul>
+                            <li>If the browser doesn't open automatically, click "Open Converter" from the menu bar icon</li>
+                            <li>The port number is shown in the menu bar tooltip (usually :8081)</li>
+                            <li>If the app won't open on first launch, right-click → Open to bypass Gatekeeper</li>
+                            <li>If the browser shows a disconnect message, the app has been closed — relaunch from Applications</li>
+                        </ul>
+                    </div>
+
+                    <h2>Channel Types</h2>
+                    <ul>
+                        <li><strong>Inputs</strong> — input channels from the console</li>
+                        <li><strong>Aux Outputs</strong> — aux/monitor mixes</li>
+                        <li><strong>Group Outputs</strong> — group/subgroup buses</li>
+                        <li><strong>Matrix Outputs</strong> — matrix outputs</li>
+                        <li><strong>Custom</strong> — channels added manually</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
 
         <h1>Console to Reaper Converter</h1>
         <p class="subtitle">Convert show files from DiGiCo SD/Quantum/S-Series, Yamaha Rivage/DM7, A&amp;H dLive/Avantis/SQ, Behringer X32/Wing, Midas M32, Avid S6L, or Waves LV1 to Reaper track templates</p>
@@ -2680,6 +2929,16 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             addBtn.onclick = addTab;
             bar.appendChild(addBtn);
         }
+
+        function openInstructions() {
+            document.getElementById('instructionsOverlay').classList.add('open');
+        }
+        function closeInstructions() {
+            document.getElementById('instructionsOverlay').classList.remove('open');
+        }
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeInstructions();
+        });
 
         // Initialise
         loadTabState();
@@ -3743,12 +4002,13 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         '''
 
         if WEB_MODE:
-            # OSC live-import needs to run on the console's local network —
-            # hide the bar rather than editing the template (JS elsewhere
-            # references these elements unconditionally by id).
+            # OSC live-import needs to run on the console's local network, and
+            # the menu bar/Gatekeeper instructions only apply to the desktop
+            # app — hide rather than editing the templates (JS elsewhere
+            # references the OSC elements unconditionally by id).
             html = html.replace(
                 '</head>',
-                '<style>.osc-bar{display:none!important}</style></head>', 1)
+                '<style>.osc-bar,.desktop-only-instructions{display:none!important}</style></head>', 1)
 
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
