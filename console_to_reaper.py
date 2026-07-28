@@ -28,30 +28,31 @@ IS_MAC = platform.system() == 'Darwin'
 # disabled since it needs to run on the console's local network.
 WEB_MODE = os.environ.get('CONSOLE_TO_REAPER_WEB', '') == '1'
 
-if not WEB_MODE:
-    if IS_MAC:
-        try:
-            import rumps
-        except ImportError:
-            print("Installing rumps...")
-            subprocess.run([sys.executable, '-m', 'pip', 'install', 'rumps', '--break-system-packages'], check=True)
-            import rumps
-    else:
-        try:
-            import pystray
-            from PIL import Image, ImageDraw
-        except ImportError:
-            print("Installing pystray + Pillow...")
-            subprocess.run([sys.executable, '-m', 'pip', 'install', 'pystray', 'Pillow'], check=True)
-            import pystray
-            from PIL import Image, ImageDraw
+if IS_MAC and not WEB_MODE:
+    try:
+        import rumps
+    except ImportError:
+        print("Installing rumps...")
+        subprocess.run([sys.executable, '-m', 'pip', 'install', 'rumps', '--break-system-packages'], check=True)
+        import rumps
 else:
-    # Headless web mode never instantiates ConsoleToReaperApp, but its
+    # Every non-macOS-desktop path (Windows/Linux desktop, or any headless
+    # web mode) never instantiates ConsoleToReaperApp, but its
     # `class ConsoleToReaperApp(rumps.App):` statement below still resolves
     # `rumps.App` at module-load time — stand in with a harmless base class.
     class _RumpsStub:
         App = object
     rumps = _RumpsStub()
+
+if not IS_MAC and not WEB_MODE:
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+    except ImportError:
+        print("Installing pystray + Pillow...")
+        subprocess.run([sys.executable, '-m', 'pip', 'install', 'pystray', 'Pillow'], check=True)
+        import pystray
+        from PIL import Image, ImageDraw
 
 def parse_digico_rtf(rtf_content):
     """Parse DiGiCo RTF session report and extract all channel sections"""
