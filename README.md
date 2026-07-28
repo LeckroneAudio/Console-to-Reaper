@@ -53,6 +53,7 @@ ADDING AND EDITING CHANNELS:
 - Use the Up/Down arrow keys while renaming to move to the next or previous channel
 - Click the ✕ on any channel row to remove it immediately
 - Select one or more channels and press Delete (or Backspace on Windows) to remove with confirmation
+- Click "Auto-Enumerate" to prefix every checked channel's name with its position number (e.g. 01 Kick, 02 Snare) — numbers are zero-padded to match the count
 
 SELECTING CHANNELS:
 - Click any channel row to highlight it

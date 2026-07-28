@@ -2436,6 +2436,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                         <li>Use the Up/Down arrow keys while renaming to move to the next or previous channel</li>
                         <li>Click the ✕ on any channel row to remove it immediately</li>
                         <li>Select one or more channels and press Delete (or Backspace on Windows) to remove with confirmation</li>
+                        <li>Click "Auto-Enumerate" to prefix every checked channel's name with its position number (e.g. 01 Kick, 02 Snare) — numbers are zero-padded to match the count</li>
                     </ul>
 
                     <h2>Selecting Channels</h2>
@@ -2584,6 +2585,7 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
                     <button onclick="selectAll()">Select All</button>
                     <button onclick="selectNone()">Deselect All</button>
                     <button onclick="removeUnnamed()" title="Remove channels with console-default placeholder names (Cmd+Z to undo)">Remove Unnamed</button>
+                    <button onclick="autoEnumerate()" title="Prefix each selected channel's name with its position number (e.g. 01 Kick, 02 Snare)">Auto-Enumerate</button>
                     <button id="undoBtn" onclick="undo()" disabled style="opacity: 0.4;">↩ Undo</button>
                     <button onclick="openAddChannelModal()" style="background: #007aff; color: white;">+ Add Channel</button>
                 </div>
@@ -3574,6 +3576,24 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             showPreview(currentCombinedChannels);
             refreshSectionCounts();
             updateBulkBar();
+        }
+
+        function autoEnumerate() {
+            if (selectedChannels.size === 0) {
+                showMessage('Select at least one channel to enumerate', 'error');
+                return;
+            }
+
+            saveUndo();
+
+            const indices = Array.from(selectedChannels).sort((a, b) => a - b);
+            const padWidth = String(indices.length).length;
+            indices.forEach((idx, i) => {
+                const num = String(i + 1).padStart(padWidth, '0');
+                currentCombinedChannels[idx].name = num + ' ' + currentCombinedChannels[idx].name;
+            });
+
+            showPreview(currentCombinedChannels);
         }
 
         function downloadTemplate() {
