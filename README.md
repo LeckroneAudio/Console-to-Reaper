@@ -1,6 +1,12 @@
 Console to Reaper v4.0
 ======================
 
+Try it hosted, no install needed: https://consoleconverter.com
+(file-upload conversion only — live OSC pull needs the desktop app)
+
+Download the desktop app (macOS/Windows):
+https://github.com/LeckroneAudio/Console-to-Reaper/releases/latest
+
 INSTALLATION:
 1. Drag "Console to Reaper.app" to your Applications folder
 2. Double-click to launch

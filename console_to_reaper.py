@@ -1837,6 +1837,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             padding: 12px 16px;
             margin: 10px 0;
         }
+        .web-only-instructions { display: none; }
         .upload-area {
             border: 3px dashed #d2d2d7;
             border-radius: 12px;
@@ -2381,6 +2382,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         
         <div class="tab-bar-row">
             <button class="instructions-tab-btn" onclick="openInstructions()">📖 Instructions</button>
+            <a class="instructions-tab-btn" href="https://github.com/LeckroneAudio/Console-to-Reaper/releases/latest" target="_blank" rel="noopener" style="text-decoration: none; display: inline-block;" title="Download the desktop app for macOS or Windows">⬇️ Download App</a>
             <div class="tab-bar" id="tabBar"></div>
         </div>
 
@@ -2389,6 +2391,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                 <button class="instructions-close" onclick="closeInstructions()" title="Close">✕</button>
                 <div class="instructions-content">
                     <h1>Console to Reaper — Instructions</h1>
+
+                    <p class="web-only-instructions">This hosted version handles file-upload conversion. For live OSC pull from a DiGiCo console, use the desktop app — click "⬇️ Download App" above to get it for macOS or Windows.</p>
 
                     <h2>Supported Consoles</h2>
                     <ul>
@@ -4029,7 +4033,8 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             # references the OSC elements unconditionally by id).
             html = html.replace(
                 '</head>',
-                '<style>.osc-bar,.desktop-only-instructions{display:none!important}</style></head>', 1)
+                '<style>.osc-bar,.desktop-only-instructions{display:none!important}'
+                '.web-only-instructions{display:block!important}</style></head>', 1)
 
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
