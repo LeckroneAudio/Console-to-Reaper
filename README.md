@@ -1,4 +1,4 @@
-Console to Reaper v3.5
+Console to Reaper v4.0
 ======================
 
 INSTALLATION:
@@ -164,5 +164,5 @@ CHANNEL TYPES:
 
 Built by: Michael Leckrone
 Contact: leckroneaudio@gmail.com
-Version: 3.5
+Version: 4.0
 GitHub: github.com/LeckroneAudio/Console-to-Reaper

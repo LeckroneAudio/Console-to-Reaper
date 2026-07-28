@@ -12,8 +12,8 @@ OPTIONS = {
         'CFBundleName': 'Console to Reaper',
         'CFBundleDisplayName': 'Console to Reaper',
         'CFBundleIdentifier': 'com.leckroneaudio.consoletoreaper',
-        'CFBundleVersion': '3.5.0',
-        'CFBundleShortVersionString': '3.5.0',
+        'CFBundleVersion': '4.0.0',
+        'CFBundleShortVersionString': '4.0.0',
         'LSUIElement': False,  # Show in Dock
         'NSHighResolutionCapable': True,
         'NSAppSleepDisabled': True,  # no App Nap — server must stay responsive
