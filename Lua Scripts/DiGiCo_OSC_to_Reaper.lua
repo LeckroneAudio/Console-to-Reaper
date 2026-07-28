@@ -498,26 +498,17 @@ local function fetch_from_console()
     local ip = reaper.GetExtState("DiGiCo_OSC", "ip")
     local sp = reaper.GetExtState("DiGiCo_OSC", "sendport")
     local lp = reaper.GetExtState("DiGiCo_OSC", "listenport")
-    local have_saved = (ip ~= "" and sp ~= "" and lp ~= "")
     if ip == "" then ip = "192.168.10.232" end
     if sp == "" then sp = "8012" end
     if lp == "" then lp = "8011" end
 
-    -- Only prompt when there are no saved settings; otherwise go straight
-    -- to the fetch so the action runs hotkey -> picker with no dialogs.
-    if not have_saved then
-        ip, sp, lp = ask_settings(ip, sp, lp)
-        if not ip then return nil end
-    end
+    -- Always shown, pre-filled with saved values — this doubles as the
+    -- settings editor (no separate settings script needed): Enter accepts
+    -- what's saved, or edit the fields first.
+    ip, sp, lp = ask_settings(ip, sp, lp)
+    if not ip then return nil end
 
     local out = run_fetch(ip, sp, lp)
-    if out == "" and have_saved then
-        -- Saved settings didn't answer (console IP changed?) — offer the
-        -- dialog once and retry.
-        ip, sp, lp = ask_settings(ip, sp, lp)
-        if not ip then return nil end
-        out = run_fetch(ip, sp, lp)
-    end
     if out == nil then return nil end
 
     if out == "" then

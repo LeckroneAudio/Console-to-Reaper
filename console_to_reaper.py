@@ -2508,7 +2508,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                                  with an interactive channel selector
 DiGiCo_to_Reaper.lua            — DiGiCo SD/Quantum (.rtf), Input Channels only
 DiGiCo_OSC_to_Reaper.lua        — DiGiCo SD/Quantum, live import over OSC
-DiGiCo_OSC_Settings.lua         — configures the OSC connection used above
+                                   (prompts for console IP/ports each run,
+                                   pre-filled with the last values used)
 DiGiCo_S_Series_to_Reaper.lua   — DiGiCo S-Series (.session), Input Channels only
 Rivage_to_Reaper.lua            — Yamaha Rivage PM (.RIVAGEPM), Input Channels only
 DM7_to_Reaper.lua               — Yamaha DM7 (.dm7f), Input Channels only
