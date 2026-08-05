@@ -1186,6 +1186,33 @@ def parse_ses_show_file(file_content):
                 best_score, best_off = score, p
         return best_score, best_off
 
+    # A separate, perfectly regular 125-byte-stride table holds clean
+    # Pascal-style names for every channel (signature + 2-byte patch ref +
+    # 2-byte 1-based counter + 1-byte length + name), independent of the
+    # dirty 92-stride display buffers above. When present it is authoritative
+    # and sidesteps the drift/garbage that the dirty-buffer heuristics below
+    # are prone to; fall back to those heuristics if it's absent (e.g. an
+    # older console software version that doesn't write this table).
+    STRIDE_TABLE = 125
+    TABLE_SIG = b'\xcb\x00y\x00'
+
+    def get_table_name(off, i, prefix):
+        p = off + i * STRIDE_TABLE - 9
+        if p < 0 or p + 9 > len(data):
+            return None
+        if data[p:p + 4] != TABLE_SIG:
+            return None
+        if struct.unpack_from('<H', data, p + 6)[0] != i + 1:
+            return None
+        ln = data[p + 8]
+        if ln == 0 or p + 9 + ln > len(data):
+            return None
+        raw = data[p + 9:p + 9 + ln]
+        if not all(0x20 <= b <= 0x7e for b in raw):
+            return None
+        name = raw.decode('ascii').rstrip()
+        return name, bool(_default_res[prefix].match(name))
+
     # ---- Inputs ----
     inp_sec = secs[b'Input Channels']
     if inp_sec:
@@ -1195,7 +1222,10 @@ def parse_ses_show_file(file_content):
         score, blk = find_best_block(labeled)
         _def = _default_res['Ch']
         for i in range(inp_cnt):
-            if blk is not None and score >= inp_cnt * 0.6:
+            table = get_table_name(ic_off, i, 'Ch')
+            if table is not None:
+                name, is_default = table
+            elif blk is not None and score >= inp_cnt * 0.6:
                 name = get_name(blk + i * STRIDE_212).rstrip()
                 is_default = not name or bool(_def.match(name))
             else:
@@ -1214,7 +1244,10 @@ def parse_ses_show_file(file_content):
         score, blk = find_best_block(labeled)
         _def = _default_res['Grp']
         for i in range(g_cnt):
-            if blk is not None and score >= g_cnt * 0.75:
+            table = get_table_name(g_off, i, 'Grp')
+            if table is not None:
+                name, is_default = table
+            elif blk is not None and score >= g_cnt * 0.75:
                 name = get_name(blk + i * STRIDE_212).rstrip()
                 is_default = not name or bool(_def.match(name))
             else:
@@ -1233,7 +1266,11 @@ def parse_ses_show_file(file_content):
         _, off, cnt = s
         for i in range(cnt):
             stereo = data[off + i * STRIDE_92 + 32] == 0x02
-            name, is_default = clean_name(get_name(off + i * STRIDE_92), pfx, i + 1, stereo)
+            table = get_table_name(off, i, pfx)
+            if table is not None:
+                name, is_default = table
+            else:
+                name, is_default = clean_name(get_name(off + i * STRIDE_92), pfx, i + 1, stereo)
             if not name:
                 name = '%s %d' % (pfx, i + 1)
             result[key].append({'number': '%s%d%s' % (num_pfx, i + 1, 's' if stereo else ''),
