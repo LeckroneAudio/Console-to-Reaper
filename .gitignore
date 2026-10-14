@@ -230,3 +230,6 @@ dump_*.txt
 explore*_results.txt
 probe_*.txt
 restructure_capture.txt
+
+# Show files used as local test fixtures (private show data, never committed)
+*.ses

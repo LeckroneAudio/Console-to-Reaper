@@ -108,6 +108,17 @@ MENU BAR OPTIONS:
 - Restart Server — restarts the local server if something goes wrong
 - Quit — properly closes the app and stops the server
 
+PRIVACY:
+Your show files are not stored or shared.
+  - Desktop app (macOS/Windows) and Lua scripts: everything is read on your
+    own computer. Nothing is uploaded or sent over the internet.
+  - Hosted version (consoleconverter.com): DiGiCo .ses files are read in your
+    browser and never leave your computer. Other formats are sent to the
+    server only to read the channel list. They're processed in memory, never
+    written to disk or logged, and discarded right away.
+  - The only thing remembered is the OSC connection (console IP and ports),
+    in your own browser, so it's pre-filled next time.
+
 LUA SCRIPTS (OPTIONAL — REAPER DIRECT IMPORT):
 ReaScripts are included in the .zip for importing directly into Reaper
 without using the converter app or browser at all — one per console, plus
@@ -115,7 +126,12 @@ DiGiCo has extra options.
 
   DiGiCo_to_Reaper_Full.lua       — DiGiCo SD/Quantum (.ses or .rtf), all
                                      sections (Inputs/Aux/Groups/Matrix)
-                                     with an interactive channel selector
+                                     with an interactive channel selector;
+                                     .ses inputs default to Copy Audio
+                                     record order (Waves N = track N)
+  DiGiCo_Copy_Audio_to_Reaper.lua — DiGiCo SD/Quantum (.ses), one step: tracks
+                                     in Copy Audio record order on their
+                                     recorder inputs, no window or options
   DiGiCo_to_Reaper.lua            — DiGiCo SD/Quantum (.rtf), Input Channels only
   DiGiCo_OSC_to_Reaper.lua        — DiGiCo SD/Quantum, live import over OSC
                                      (prompts for console IP/ports each run,

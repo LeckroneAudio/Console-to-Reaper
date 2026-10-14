@@ -5,6 +5,7 @@ Parses show files from multiple consoles and generates Reaper track templates
 """
 
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+import contextlib
 import io
 import json
 import os
@@ -27,6 +28,14 @@ IS_MAC = platform.system() == 'Darwin'
 # one in), server binds to all interfaces on $PORT, and OSC live-import is
 # disabled since it needs to run on the console's local network.
 WEB_MODE = os.environ.get('CONSOLE_TO_REAPER_WEB', '') == '1'
+
+# DiGiPanion .ses parser (pandabearaudio.com), served to the page so it runs
+# in the browser and reads the Copy Audio patch. Regenerate with
+# sync_digipanion.py. Without it, .ses files load in console-channel order.
+try:
+    from digipanion_bundle import DIGIPANION_JS
+except ImportError:
+    DIGIPANION_JS = None
 
 if IS_MAC and not WEB_MODE:
     try:
@@ -1084,6 +1093,17 @@ def parse_ses_show_file(file_content):
     data = file_content
     result = {'inputs': [], 'aux': [], 'groups': [], 'matrix': []}
     STRIDE_92 = 92
+    STRIDE_125 = 125
+
+    def section_stride(off, count):
+        """Per-channel record size of a labeled section: 92 bytes in older
+        sessions (format vN and earlier), 125 in newer ones (vO). The right
+        size is the one where every channel's stereo byte is 1 (mono) or 2."""
+        for stride in (STRIDE_92, STRIDE_125):
+            end = off + (count - 1) * stride + 32
+            if end < len(data) and all(data[off + i * stride + 32] in (1, 2) for i in range(count)):
+                return stride
+        return STRIDE_92
     STRIDE_212 = 212
 
     def find_section(label_bytes):
@@ -1106,7 +1126,7 @@ def parse_ses_show_file(file_content):
     # The labeled sections themselves contain the dirty strings; exclude
     # this region so dictionary lookups only hit clean copies elsewhere.
     excl_lo = min(positions) - 1000
-    excl_hi = max(positions) + 100 * STRIDE_92 + 2000
+    excl_hi = max(positions) + 100 * STRIDE_125 + 2000
 
     def in_dict(name):
         """True if name appears null-terminated outside the labeled sections."""
@@ -1217,8 +1237,9 @@ def parse_ses_show_file(file_content):
     inp_sec = secs[b'Input Channels']
     if inp_sec:
         _, ic_off, inp_cnt = inp_sec
-        labeled = [get_name(ic_off + i * STRIDE_92) for i in range(inp_cnt)]
-        i_stereo = [data[ic_off + i * STRIDE_92 + 32] == 0x02 for i in range(inp_cnt)]
+        ic_stride = section_stride(ic_off, inp_cnt)
+        labeled = [get_name(ic_off + i * ic_stride) for i in range(inp_cnt)]
+        i_stereo = [data[ic_off + i * ic_stride + 32] == 0x02 for i in range(inp_cnt)]
         score, blk = find_best_block(labeled)
         _def = _default_res['Ch']
         for i in range(inp_cnt):
@@ -1239,8 +1260,9 @@ def parse_ses_show_file(file_content):
     grp_sec = secs[b'Group Outputs']
     if grp_sec:
         _, g_off, g_cnt = grp_sec
-        labeled = [get_name(g_off + i * STRIDE_92) for i in range(g_cnt)]
-        g_stereo = [data[g_off + i * STRIDE_92 + 32] == 0x02 for i in range(g_cnt)]
+        g_stride = section_stride(g_off, g_cnt)
+        labeled = [get_name(g_off + i * g_stride) for i in range(g_cnt)]
+        g_stereo = [data[g_off + i * g_stride + 32] == 0x02 for i in range(g_cnt)]
         score, blk = find_best_block(labeled)
         _def = _default_res['Grp']
         for i in range(g_cnt):
@@ -1264,13 +1286,14 @@ def parse_ses_show_file(file_content):
         if not s:
             continue
         _, off, cnt = s
+        stride = section_stride(off, cnt)
         for i in range(cnt):
-            stereo = data[off + i * STRIDE_92 + 32] == 0x02
+            stereo = data[off + i * stride + 32] == 0x02
             table = get_table_name(off, i, pfx)
             if table is not None:
                 name, is_default = table
             else:
-                name, is_default = clean_name(get_name(off + i * STRIDE_92), pfx, i + 1, stereo)
+                name, is_default = clean_name(get_name(off + i * stride), pfx, i + 1, stereo)
             if not name:
                 name = '%s %d' % (pfx, i + 1)
             result[key].append({'number': '%s%d%s' % (num_pfx, i + 1, 's' if stereo else ''),
@@ -1409,17 +1432,26 @@ def _track_block(name, peakcol, rec_input, nchan):
 
 
 def generate_reaper_track_template(channels, stereo_mode='split'):
-    """Generate Reaper track template from channel list with sequential input routing."""
+    """Generate Reaper track template from channel list with sequential input routing.
+
+    A channel with a 'rec_input' (0-based hardware input, set by the page's
+    record order from the .ses Copy Audio patch) is recorded from exactly that
+    input as a mono track, wherever it sits in the list. Channels without one
+    are numbered sequentially after the highest explicit input."""
 
     template_lines = []
-    hw = 0  # 0-based hardware input counter
+    explicit = [c['rec_input'] for c in channels if isinstance(c.get('rec_input'), int)]
+    hw = max(explicit) + 1 if explicit else 0  # 0-based hardware input counter
 
     for channel in channels:
         name    = channel['name']
         peakcol = hex_to_reaper_color(channel['color']) if channel.get('color') else 16576
         is_stereo = channel['number'].endswith('s')
 
-        if is_stereo and stereo_mode == 'stereo':
+        if isinstance(channel.get('rec_input'), int):
+            # Fixed input from the Copy Audio patch (one recorder socket = one mono track)
+            template_lines.extend(_track_block(name, peakcol, channel['rec_input'], 1))
+        elif is_stereo and stereo_mode == 'stereo':
             # One stereo track — input encoded as 1024 + left_input_index
             template_lines.extend(_track_block(name, peakcol, 1024 + hw, 2))
             hw += 2
@@ -1649,6 +1681,32 @@ def find_available_port(start_port=8081, max_attempts=10):
     return None
 
 
+def parse_show_file(filename, file_content):
+    """Pick the parser by file extension."""
+    if filename.endswith('.rivagepm'):
+        return parse_rivage_pm_show_file(file_content)
+    elif filename.endswith('.tar.gz'):
+        return parse_dlive_show_file(file_content)
+    elif filename.endswith('.scn'):
+        return parse_m32_show_file(file_content)
+    elif filename.endswith('.snap'):
+        return parse_wing_show_file(file_content)
+    elif filename.endswith('.dsh'):
+        return parse_s6l_show_file(file_content)
+    elif filename.endswith('.dm7f'):
+        return parse_dm7_show_file(file_content)
+    elif filename.lower().endswith('.dat'):
+        return parse_sq_show_file(file_content)
+    elif filename.lower().endswith('.emo'):
+        return parse_lv1_show_file(file_content)
+    elif filename.lower().endswith('.session'):
+        return parse_s_series_show_file(file_content)
+    elif filename.lower().endswith('.ses'):
+        return parse_ses_show_file(file_content)
+    else:
+        return parse_digico_rtf(file_content)
+
+
 class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
     
     def log_message(self, format, *args):
@@ -1665,6 +1723,11 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(b'{"status":"ok"}')
+        elif self.path == '/digipanion.js':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/javascript; charset=utf-8')
+            self.end_headers()
+            self.wfile.write((DIGIPANION_JS or '// DiGiPanion parser not bundled\n').encode('utf-8'))
         else:
             self.send_error(404)
     
@@ -1876,8 +1939,8 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         }
         .web-only-instructions { display: none; }
         .upload-area {
-            border: 3px dashed #d2d2d7;
-            border-radius: 12px;
+            border: 4px solid #1d1d1f;   /* matches the .workspace box */
+            border-radius: 14px;
             padding: 60px 40px;
             text-align: center;
             background: #f9f9f9;
@@ -1906,15 +1969,33 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             font-size: 14px;
             color: #86868b;
         }
+        .privacy-note {
+            margin: -12px 0 20px;
+            font-size: 13px;
+            color: #6e6e73;
+            text-align: center;
+        }
+        .privacy-web { display: none; }
         .osc-bar {
             display: flex;
             align-items: center;
             gap: 10px;
             flex-wrap: wrap;
-            margin: 14px 0 0;
-            padding: 14px 16px;
-            background: #f5f5f7;
-            border-radius: 12px;
+            margin: 20px 0 0;
+        }
+        .osc-modal { max-width: 640px; }
+        .osc-status {
+            margin-top: 14px;
+            font-size: 14px;
+            min-height: 20px;
+        }
+        .osc-status.error { color: #c7251a; }
+        .osc-status.success { color: #248a3d; }
+        .workspace {
+            border: 4px solid #1d1d1f;
+            border-radius: 14px;
+            padding: 20px 24px;
+            margin-top: 10px;
         }
         .osc-bar-label {
             font-size: 14px;
@@ -1934,7 +2015,7 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
             border-color: #007aff;
         }
         .osc-ip { width: 150px; }
-        .osc-port { width: 78px; }
+        .osc-port { width: 100px; }
         .osc-bar button {
             padding: 8px 16px;
             font-size: 14px;
@@ -1949,8 +2030,9 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         .osc-bar button:disabled { background: #a7c8f0; cursor: default; }
         .osc-hint {
             flex-basis: 100%;
-            font-size: 12px;
+            font-size: 13px;
             color: #86868b;
+            margin-top: 6px;
         }
         input[type="file"] {
             display: none;
@@ -2192,6 +2274,35 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         .stereo-toggle-label {
             font-weight: 500;
         }
+        .record-order-bar {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 12px;
+            margin-bottom: 12px;
+            padding: 12px 15px;
+            background: #f0f8ff;
+            border: 1px solid #cfe3ff;
+            border-radius: 8px;
+            font-size: 14px;
+            color: #1d1d1f;
+        }
+        .record-order-bar select {
+            padding: 5px 8px;
+            border: 1px solid #d2d2d7;
+            border-radius: 6px;
+            font-size: 13px;
+            background: white;
+        }
+        .record-order-summary {
+            flex-basis: 100%;
+            font-size: 13px;
+            color: #555;
+        }
+        .record-order-summary .warn { color: #c7251a; }
+        .stereo-option.unavailable { color: #c7c7cc; cursor: not-allowed; }
+        .badge-slot { background: #e8f0fe; color: #0051d5; text-transform: none; }
+        .track-name.empty-slot { color: #b0b0b5; font-style: italic; }
         .stereo-toggle-options {
             display: flex;
             background: #f2f2f7;
@@ -2419,8 +2530,27 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
         
         <div class="tab-bar-row">
             <button class="instructions-tab-btn" onclick="openInstructions()">📖 Instructions</button>
+            <button class="instructions-tab-btn osc-tab-btn" onclick="openOscPanel()" title="Pull channel names live from a DiGiCo console over OSC">📡 Pull from Console</button>
             <a class="instructions-tab-btn" href="https://github.com/LeckroneAudio/Console-to-Reaper/releases/latest" target="_blank" rel="noopener" style="text-decoration: none; display: inline-block;" title="Download the desktop app for macOS or Windows">⬇️ Download App</a>
             <div class="tab-bar" id="tabBar"></div>
+        </div>
+
+        <div class="instructions-overlay" id="oscOverlay" onclick="if (event.target === this) closeOscPanel()">
+            <div class="instructions-modal osc-modal">
+                <button class="instructions-close" onclick="closeOscPanel()" title="Close">✕</button>
+                <div class="instructions-content">
+                    <h1>📡 Pull from Console</h1>
+                    <p>Load channel names and stereo modes live from a DiGiCo SD/Quantum console over OSC.</p>
+                <div class="osc-bar">
+                    <input type="text" id="oscIp" class="osc-ip" placeholder="Console IP" spellcheck="false">
+                    <input type="text" id="oscSendPort" class="osc-port" placeholder="Rcv 8012" title="The console's Rcv port" spellcheck="false">
+                    <input type="text" id="oscListenPort" class="osc-port" placeholder="Send 8011" title="The console's Send port" spellcheck="false">
+                    <button id="oscConnectBtn" onclick="fetchFromConsole()">Connect</button>
+                    <span class="osc-hint">Console: Setup &gt; External Control &gt; add device (type iPad) with this computer's IP. Enter the same Send and Rcv ports as the console's device entry.</span>
+                </div>
+                    <div class="osc-status" id="oscStatus"></div>
+                </div>
+            </div>
         </div>
 
         <div class="instructions-overlay" id="instructionsOverlay" onclick="if (event.target === this) closeInstructions()">
@@ -2542,7 +2672,12 @@ class DiGiCoToReaperHandler(BaseHTTPRequestHandler):
                     <p>ReaScripts are available for importing directly into Reaper without using the converter at all — one per console, plus DiGiCo has extra options.</p>
                     <div class="lua-list">DiGiCo_to_Reaper_Full.lua       — DiGiCo SD/Quantum (.ses or .rtf), all
                                  sections (Inputs/Aux/Groups/Matrix)
-                                 with an interactive channel selector
+                                 with an interactive channel selector;
+                                 .ses inputs default to Copy Audio
+                                 record order (Waves N = track N)
+DiGiCo_Copy_Audio_to_Reaper.lua — DiGiCo SD/Quantum (.ses), one step: tracks
+                                 in Copy Audio record order on their
+                                 recorder inputs, no window or options
 DiGiCo_to_Reaper.lua            — DiGiCo SD/Quantum (.rtf), Input Channels only
 DiGiCo_OSC_to_Reaper.lua        — DiGiCo SD/Quantum, live import over OSC
                                    (prompts for console IP/ports each run,
@@ -2591,21 +2726,28 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             <div class="upload-subtext">or click to browse &nbsp;·&nbsp; DiGiCo SD/Quantum (.ses, .rtf) &nbsp;·&nbsp; DiGiCo S-Series (.session) &nbsp;·&nbsp; Yamaha Rivage (.RIVAGEPM) &nbsp;·&nbsp; A&amp;H dLive/Avantis (.tar.gz) &nbsp;·&nbsp; A&amp;H SQ (.dat) &nbsp;·&nbsp; Behringer X32 / Midas M32 (.scn) &nbsp;·&nbsp; Behringer Wing (.snap) &nbsp;·&nbsp; Avid S6L (.dsh) &nbsp;·&nbsp; Yamaha DM7 (.dm7f) &nbsp;·&nbsp; Waves LV1 (.emo)</div>
         </div>
 
-        <input type="file" id="fileInput" accept=".rtf,.ses,.SES,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,.emo,.EMO,.session,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
+        <div class="privacy-note privacy-desktop">🔒 Private: your show file is read on this computer and is never uploaded, saved or shared. Nothing goes over the internet.</div>
+        <div class="privacy-note privacy-web">🔒 Private: DiGiCo .ses files are read in your browser and never leave your computer. Other formats are sent to this site only to read the channel list — they are processed in memory and never saved or logged.</div>
 
-        <div class="osc-bar">
-            <span class="osc-bar-label">📡 Or pull live from console (DiGiCo OSC):</span>
-            <input type="text" id="oscIp" class="osc-ip" placeholder="Console IP" spellcheck="false">
-            <input type="text" id="oscSendPort" class="osc-port" placeholder="Rcv 8012" title="The console's Rcv port" spellcheck="false">
-            <input type="text" id="oscListenPort" class="osc-port" placeholder="Send 8011" title="The console's Send port" spellcheck="false">
-            <button id="oscConnectBtn" onclick="fetchFromConsole()">Connect</button>
-            <span class="osc-hint">Console: Setup &gt; External Control &gt; add device (type iPad) with this computer's IP. Enter the same Send and Rcv ports as the console's device entry.</span>
-        </div>
+        <input type="file" id="fileInput" accept=".rtf,.ses,.SES,.RIVAGEPM,.rivagepm,.tar.gz,.scn,.snap,.dsh,.dm7f,.dat,.DAT,.emo,.EMO,.session,application/gzip,application/x-gzip,application/x-tar,application/json" onchange="handleFile(this.files[0])">
 
         <div id="message" class="message"></div>
         
         <div style="text-align: right; margin: -15px 0 20px;">
             <button class="btn-secondary" onclick="openAddChannelModal()" style="font-size: 14px; padding: 8px 16px;">+ Add Channel Manually</button>
+        </div>
+
+        <div class="workspace">
+        <div id="recordOrderBar" class="record-order-bar" style="display: none;">
+            <span class="stereo-toggle-label">🎙️ Track order:</span>
+            <div class="stereo-toggle-options">
+                <div class="stereo-option active" id="optRecordOrder" onclick="setRecordOrder(true)">Record Order (Copy Audio)</div>
+                <div class="stereo-option" id="optChannelOrder" onclick="setRecordOrder(false)">Console Channel Order</div>
+            </div>
+            <label style="display: flex; align-items: center; gap: 6px; margin: 0;">Recorder:
+                <select id="recordPort" onchange="changeRecordPort(this.value)"></select>
+            </label>
+            <div class="record-order-summary" id="recordOrderSummary"></div>
         </div>
 
         <div class="stereo-toggle">
@@ -2707,11 +2849,12 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
                 <button class="btn-secondary" onclick="reset()">🔄 Upload New File</button>
             </div>
         </div>
-        
+        </div><!-- /workspace -->
+
         <div class="info-box">
             <h3>How to use:</h3>
             <ol>
-                <li><strong>DiGiCo SD / Quantum:</strong> Copy the show file directly from the console USB (.ses), export a session report (.rtf), or pull channels live over OSC using the bar above</li>
+                <li><strong>DiGiCo SD / Quantum:</strong> Copy the show file directly from the console USB (.ses), export a session report (.rtf), or pull channels live over OSC with the 📡 Pull from Console button above</li>
                 <li><strong>DiGiCo S-Series:</strong> Copy the .session file from the console or S-Series software (.session)</li>
                 <li><strong>Yamaha Rivage PM:</strong> Copy the .RIVAGEPM show file from the console or Rivage PM Editor</li>
                 <li><strong>Allen &amp; Heath dLive / Avantis:</strong> Export the show file from dLive Director or Avantis Director (.tar.gz)</li>
@@ -2788,6 +2931,7 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
         </div>
     </div>
     
+    <script src="/digipanion.js"></script>
     <script>
         // ── Tab / Session management ────────────────────────────────────────
         function newSessionState(name) {
@@ -2866,6 +3010,7 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
                 showPreview(s.currentCombinedChannels);
                 refreshSectionCounts();
             }
+            updateRecordBar();
             updateUndoBtn();
             updateBulkBar();
         }
@@ -2981,8 +3126,28 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
         function closeInstructions() {
             document.getElementById('instructionsOverlay').classList.remove('open');
         }
+        function openOscPanel() {
+            document.getElementById('oscOverlay').classList.add('open');
+            setOscStatus('', '');
+            const ip = document.getElementById('oscIp');
+            ip.focus();
+            ip.select();
+        }
+        function closeOscPanel() {
+            document.getElementById('oscOverlay').classList.remove('open');
+        }
+        function setOscStatus(msg, type) {
+            const el = document.getElementById('oscStatus');
+            el.textContent = msg;
+            el.className = 'osc-status' + (type ? ' ' + type : '');
+        }
         document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeInstructions();
+            if (e.key === 'Escape') { closeInstructions(); closeOscPanel(); }
+        });
+        ['oscIp', 'oscSendPort', 'oscListenPort'].forEach(id => {
+            document.getElementById(id).addEventListener('keydown', e => {
+                if (e.key === 'Enter') fetchFromConsole();
+            });
         });
 
         // Initialise
@@ -3070,7 +3235,11 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             // Update preview with selected sections
             updateSectionPreview();
 
-            const total = data.counts.inputs + data.counts.aux + data.counts.groups + data.counts.matrix;
+            // Record order replaces the input list, but the message reports every channel
+            // the file holds (console inputs, not just the copied ones)
+            const record = getTab().record;
+            const inputs = record ? record.consoleInputs.length : data.counts.inputs;
+            const total = inputs + data.counts.aux + data.counts.groups + data.counts.matrix;
             if (total === 0) {
                 const ext = sourceLabel.split('.').pop().toLowerCase();
                 const hint = (ext === 'rtf')
@@ -3080,19 +3249,270 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
                     : '';
                 showMessage('✗ "' + sourceLabel + '" — No Channels Found.' + hint, 'error');
             } else {
-                showMessage(`✓ "${sourceLabel}" — ${total} total channels (${data.counts.inputs} inputs, ${data.counts.aux} aux, ${data.counts.groups} groups, ${data.counts.matrix} matrix)`, 'success');
+                let msg = `✓ "${sourceLabel}" — ${total} total channels (${inputs} inputs, ${data.counts.aux} aux, ${data.counts.groups} groups, ${data.counts.matrix} matrix)`;
+                if (record && record.noCopy) {
+                    msg += ' · no Copy Audio patch, using console channel order';
+                } else if (record && record.enabled) {
+                    const copied = record.ports.find(p => p.port === record.port);
+                    msg += ` · ${copied ? copied.count : 0} copied to ${record.port}, selected for recording`;
+                }
+                showMessage(msg, 'success');
             }
+        }
+
+        // ── Record order from the .ses Copy Audio patch ─────────────────────
+        // The DiGiPanion parser (/digipanion.js) reads which recorder socket each
+        // input is copied to. Tracks are laid out socket 1..N with an empty track
+        // for any unused socket, and each track carries rec_input so Reaper
+        // input N records socket N even after the list is edited or reordered.
+
+        function parseSessionInBrowser(file) {
+            if (!window.digipanionParseSession) return Promise.resolve(null);
+            return file.arrayBuffer().then(buffer => {
+                try {
+                    return window.digipanionParseSession(buffer, file.name);
+                } catch (e) {
+                    return { error: e.message };
+                }
+            }).catch(() => null);
+        }
+
+        function copyLabelParts(label) {
+            // "Waves 12" or "6:USB 4" -> { port: "Waves", socket: 12 }
+            const m = /^(?:([0-9]+):)?(.+) ([0-9]+)$/.exec(label);
+            return m ? { port: m[2], socket: parseInt(m[3]) } : null;
+        }
+
+        function copyAssignments(session) {
+            // Copy Audio taps a socket (preamp), not a channel. With alternate inputs several
+            // channels list the same socket, so each copied socket is given to one owner: the
+            // channel the parser names for that socket, else the one using it as its main
+            // input. A copied socket with no channel still records, so it is kept (row null).
+            const rows = session.sections['Input Channels'] || [];
+            const out = [];
+            (session.sources || []).forEach(src => {
+                if (!src.copyAudio || !src.copyAudio.length) return;
+                const users = rows.filter(r => r.inputs.includes(src.input));
+                const row = users.find(r => r.name === src.channel)
+                         || users.find(r => r.inputs[0] === src.input)
+                         || users[0] || null;
+                out.push({ socket: src.input, row, copies: src.copyAudio });
+            });
+            return out;
+        }
+
+        function copyAudioPorts(session) {
+            const counts = {};
+            copyAssignments(session).forEach(a => a.copies.forEach(label => {
+                const p = copyLabelParts(label);
+                if (p) counts[p.port] = (counts[p.port] || 0) + 1;
+            }));
+            return Object.keys(counts)
+                .map(port => ({ port, count: counts[port] }))
+                .sort((a, b) => b.count - a.count);
+        }
+
+        function buildRecordOrder(record) {
+            const byNumber = {};
+            record.consoleInputs.forEach(ch => { byNumber[ch.number.replace(/^CH/, '').replace(/s$/, '')] = ch; });
+
+            // Sockets copied to the recorder port, per recorder socket number
+            const slots = {};
+            const legs = new Map();   // row -> its sockets on this port, for stereo L/R
+            copyAssignments(record.session).forEach(a => a.copies.forEach(label => {
+                const p = copyLabelParts(label);
+                if (!p || p.port !== record.port) return;
+                (slots[p.socket] = slots[p.socket] || []).push(a);
+                if (a.row) legs.set(a.row, (legs.get(a.row) || []).concat(a.socket));
+            }));
+
+            const sockets = Object.keys(slots).map(Number);
+            const last = sockets.length ? Math.max(...sockets) : 0;
+            const tracks = [];
+            const shared = [];
+            for (let n = 1; n <= last; n++) {
+                const slot = record.port + ' ' + n;
+                const here = slots[n];
+                if (!here) {
+                    tracks.push({ number: slot, name: '', type: 'inputs', is_default: false,
+                                  is_empty: true, rec_input: n - 1, slot });
+                    continue;
+                }
+                if (here.length > 1) {
+                    shared.push(slot + ' (' + here.map(a => a.row ? a.row.name : a.socket).join(', ') + ')');
+                    here.sort((x, y) => (x.row ? 0 : 1) - (y.row ? 0 : 1));
+                }
+                const a = here[0];
+                if (!a.row) {
+                    // Copied preamp that feeds no channel: name it after the socket
+                    tracks.push({ number: a.socket, name: a.socket, type: 'inputs', is_default: true,
+                                  rec_input: n - 1, slot });
+                    continue;
+                }
+                const num = a.row.id.replace(/s$/, '');
+                const consoleCh = byNumber[num];
+                let name = consoleCh ? consoleCh.name : a.row.name;
+                // A stereo channel copying two sockets records as L and R (in input order)
+                const mine = legs.get(a.row) || [];
+                if (a.row.id.endsWith('s') && mine.length === 2) {
+                    const order = mine.slice().sort((x, y) => a.row.inputs.indexOf(x) - a.row.inputs.indexOf(y));
+                    name += order[0] === a.socket ? ' L' : ' R';
+                }
+                tracks.push({ number: 'CH' + num, name, type: 'inputs',
+                              is_default: consoleCh ? !!consoleCh.is_default : false,
+                              rec_input: n - 1, slot });
+            }
+            return { tracks, shared, last, used: sockets.length };
+        }
+
+        function setupRecordOrder(data, session) {
+            const tab = getTab();
+            tab.record = null;
+            if (session && !session.error) {
+                const ports = copyAudioPorts(session);
+                if (!ports.length) {
+                    // Session read fine but has no Copy Audio patch: offer the option,
+                    // explain why it isn't available, stay in console channel order
+                    tab.record = { session, ports: [], port: null, enabled: false, noCopy: true,
+                                   consoleInputs: data.sections.inputs };
+                } else {
+                    tab.record = {
+                        session,
+                        ports,
+                        port: ports[0].port,          // the socket set with the most copies (e.g. Waves)
+                        enabled: true,
+                        consoleInputs: data.sections.inputs,
+                    };
+                    const built = buildRecordOrder(tab.record);
+                    data.sections.inputs = built.tracks;
+                    data.counts.inputs = built.tracks.length;
+                }
+            }
+            updateRecordBar();
+        }
+
+        function applyRecordOrder() {
+            const record = getTab().record;
+            if (!record) return;
+            const tracks = record.enabled ? buildRecordOrder(record).tracks : record.consoleInputs;
+            parsedSections.inputs = tracks;
+            document.getElementById('inputsCount').textContent = tracks.length;
+            updateSectionPreview();
+            updateRecordBar();
+        }
+
+        function setRecordOrder(enabled) {
+            const record = getTab().record;
+            if (record && record.noCopy) {
+                if (enabled) showMessage('⚠ No Copy Audio patch in this session — using console channel order.', 'error');
+                return;
+            }
+            if (!record || record.enabled === enabled) return;
+            if (currentCombinedChannels.length && !confirm('Rebuild the track list? Edits made to the current list will be replaced.')) return;
+            record.enabled = enabled;
+            applyRecordOrder();
+        }
+
+        function changeRecordPort(port) {
+            const record = getTab().record;
+            if (!record) return;
+            if (currentCombinedChannels.length && !confirm('Rebuild the track list from ' + port + '? Edits made to the current list will be replaced.')) {
+                document.getElementById('recordPort').value = record.port;
+                return;
+            }
+            record.port = port;
+            record.enabled = true;
+            applyRecordOrder();
+        }
+
+        function updateRecordBar() {
+            const tab = getTab();
+            const record = tab.record;
+            const bar = document.getElementById('recordOrderBar');
+            if (!record) {
+                bar.style.display = 'none';
+                return;
+            }
+            bar.style.display = 'flex';
+            document.getElementById('optRecordOrder').classList.toggle('active', record.enabled);
+            document.getElementById('optChannelOrder').classList.toggle('active', !record.enabled);
+            document.getElementById('optRecordOrder').classList.toggle('unavailable', !!record.noCopy);
+            document.getElementById('optRecordOrder').title = record.noCopy ? 'This session has no Copy Audio patch' : '';
+            document.getElementById('recordPort').parentElement.style.display = record.noCopy ? 'none' : 'flex';
+            if (record.noCopy) {
+                const summary = document.getElementById('recordOrderSummary');
+                summary.innerHTML = '';
+                const warn = document.createElement('div');
+                warn.className = 'warn';
+                warn.textContent = '⚠ No Copy Audio patch in this session — using console channel order.';
+                summary.appendChild(warn);
+                return;
+            }
+
+            const select = document.getElementById('recordPort');
+            select.innerHTML = '';
+            record.ports.forEach(p => {
+                const opt = document.createElement('option');
+                opt.value = p.port;
+                opt.textContent = p.port + ' (' + p.count + ' copied)';
+                select.appendChild(opt);
+            });
+            select.value = record.port;
+            select.disabled = !record.enabled;
+
+            const summary = document.getElementById('recordOrderSummary');
+            summary.innerHTML = '';
+            const line = document.createElement('div');
+            if (record.enabled) {
+                const built = buildRecordOrder(record);
+                const empty = built.last - built.used;
+                line.textContent = built.used + ' channels on ' + record.port + ' 1–' + built.last + (empty ? ', ' + empty + ' empty track' + (empty > 1 ? 's' : '') + ' for unused sockets' : '') +
+                    '. Copy Audio channels are always mono tracks.';
+                summary.appendChild(line);
+                if (built.shared.length) {
+                    const warn = document.createElement('div');
+                    warn.className = 'warn';
+                    warn.textContent = '⚠ More than one channel is copied to: ' + built.shared.join('; ') + ' — the first is used. Check the patch on the console.';
+                    summary.appendChild(warn);
+                }
+            } else {
+                line.textContent = 'Inputs in console channel order, routed to Reaper inputs 1, 2, 3… in list order.';
+                summary.appendChild(line);
+            }
+            (record.session.warnings || []).forEach(w => {
+                const warn = document.createElement('div');
+                warn.className = 'warn';
+                warn.textContent = '⚠ ' + w;
+                summary.appendChild(warn);
+            });
         }
 
         function handleFile(file) {
             if (!file) return;
 
             ['inputs', 'aux', 'groups', 'matrix'].forEach(type => clearColorFromSection(type));
+            showMessage('Processing file...', 'success');
 
+            if (file.name.toLowerCase().endsWith('.ses')) {
+                // DiGiCo SD/Quantum: the DiGiPanion parser reads names, stereo and the
+                // Copy Audio patch in the browser. The server's parser is the fallback.
+                parseSessionInBrowser(file).then(session => {
+                    const data = session && !session.error ? sessionToSections(session) : null;
+                    if (data) {
+                        setupRecordOrder(data, session);
+                        applyParsedData(data, file.name);
+                    } else {
+                        convertOnServer(file, session);
+                    }
+                });
+                return;
+            }
+            convertOnServer(file, null);
+        }
+
+        function convertOnServer(file, session) {
             const formData = new FormData();
             formData.append('file', file);
-
-            showMessage('Processing file...', 'success');
 
             fetch('/convert', {
                 method: 'POST',
@@ -3101,7 +3521,13 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
+                    setupRecordOrder(data, session);
                     applyParsedData(data, file.name);
+                    if (session && session.error) {
+                        const msg = document.getElementById('message');
+                        showMessage(msg.textContent + ' — Copy Audio patch not read (' + session.error + '), using console channel order.',
+                                    msg.classList.contains('error') ? 'error' : 'success');
+                    }
                 } else {
                     showMessage('✗ Error: ' + data.error, 'error');
                 }
@@ -3111,12 +3537,35 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             });
         }
 
+        function sessionToSections(session) {
+            // DiGiPanion rows -> the app's channel format ({number: 'CH12s', name, type, is_default}).
+            // Returns null when the session has no channels, so the server parser is tried instead.
+            const convert = (rows, prefix, type, defaultName) => (rows || []).map(row => {
+                const m = /^[A-Za-z]*([0-9]+)(s?)$/.exec(row.id);
+                const num = m ? m[1] : row.id;
+                const name = (row.name || '').trim() || (defaultName + ' ' + num);
+                const isDefault = new RegExp('^' + defaultName + ' [0-9]+$').test(name);
+                return { number: prefix + num + (m ? m[2] : ''), name, type, is_default: isDefault };
+            });
+            const s = session.sections || {};
+            const sections = {
+                inputs: convert(s['Input Channels'], 'CH', 'inputs', 'Ch'),
+                aux:    convert(s['Aux Outputs'], 'AUX', 'aux', 'Aux'),
+                groups: convert(s['Group Outputs'], 'GRP', 'groups', 'Grp'),
+                matrix: convert(s['Matrix Outputs'], 'MTX', 'matrix', 'Matrix'),
+            };
+            const counts = {};
+            Object.keys(sections).forEach(k => { counts[k] = sections[k].length; });
+            if (!counts.inputs && !counts.aux && !counts.groups && !counts.matrix) return null;
+            return { success: true, sections, counts };
+        }
+
         function fetchFromConsole() {
             const ip = document.getElementById('oscIp').value.trim();
             const sp = document.getElementById('oscSendPort').value.trim() || '8012';
             const lp = document.getElementById('oscListenPort').value.trim() || '8011';
             if (!ip) {
-                showMessage('✗ Enter the console IP address', 'error');
+                setOscStatus('✗ Enter the console IP address', 'error');
                 return;
             }
             try {
@@ -3128,7 +3577,7 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             const btn = document.getElementById('oscConnectBtn');
             btn.disabled = true;
             btn.textContent = 'Connecting…';
-            showMessage('Connecting to console at ' + ip + '…', 'success');
+            setOscStatus('Connecting to console at ' + ip + '…', '');
 
             fetch('/osc_fetch', {
                 method: 'POST',
@@ -3138,13 +3587,15 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
+                    setupRecordOrder(data, null);
                     applyParsedData(data, data.source || ip);
+                    closeOscPanel();
                 } else {
-                    showMessage('✗ ' + data.error, 'error');
+                    setOscStatus('✗ ' + data.error, 'error');
                 }
             })
             .catch(err => {
-                showMessage('✗ Error connecting to console: ' + err, 'error');
+                setOscStatus('✗ Error connecting to console: ' + err, 'error');
             })
             .finally(() => {
                 btn.disabled = false;
@@ -3284,10 +3735,21 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
                 const info = badgeInfo[ch.type] || { text: 'CH', class: 'badge-inputs' };
                 badge.textContent = info.text;
                 badge.classList.add(info.class);
-                
+                if (ch.slot) {
+                    // Record order: badge shows the recorder socket this track records from
+                    badge.textContent = ch.slot;
+                    badge.className = 'track-badge badge-slot';
+                    badge.title = 'Reaper input ' + (ch.rec_input + 1) + ' (Copy Audio to ' + ch.slot + ')';
+                    if (ch.is_empty) number.textContent = '—';
+                }
+
                 const name = document.createElement('span');
                 name.className = 'track-name';
                 name.textContent = ch.name;
+                if (ch.is_empty && !ch.name) {
+                    name.textContent = '(empty)';
+                    name.classList.add('empty-slot');
+                }
                 
                 name.addEventListener('dblclick', (e) => { e.stopPropagation(); startEditName(idx, name, ch); });
                 name.title = 'Double-click to rename';
@@ -4018,6 +4480,7 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             const fresh = newSessionState(getTab().name);
             sessions[activeTab] = fresh;
             loadTabState();
+            updateRecordBar();
             updateBulkBar();
             updateUndoBtn();
             // Open file picker immediately
@@ -4071,8 +4534,8 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
             # references the OSC elements unconditionally by id).
             html = html.replace(
                 '</head>',
-                '<style>.osc-bar,.desktop-only-instructions{display:none!important}'
-                '.web-only-instructions{display:block!important}</style></head>', 1)
+                '<style>.osc-tab-btn,.desktop-only-instructions,.privacy-desktop{display:none!important}'
+                '.web-only-instructions,.privacy-web{display:block!important}</style></head>', 1)
 
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
@@ -4107,29 +4570,11 @@ LV1_to_Reaper.lua               — Waves LV1 (.emo), Input Channels only</div>
                 self.send_json({'success': False, 'error': 'No file found in upload'})
                 return
 
-            # Dispatch to the correct parser based on file extension
-            if filename.endswith('.rivagepm'):
-                parsed_data = parse_rivage_pm_show_file(file_content)
-            elif filename.endswith('.tar.gz'):
-                parsed_data = parse_dlive_show_file(file_content)
-            elif filename.endswith('.scn'):
-                parsed_data = parse_m32_show_file(file_content)
-            elif filename.endswith('.snap'):
-                parsed_data = parse_wing_show_file(file_content)
-            elif filename.endswith('.dsh'):
-                parsed_data = parse_s6l_show_file(file_content)
-            elif filename.endswith('.dm7f'):
-                parsed_data = parse_dm7_show_file(file_content)
-            elif filename.lower().endswith('.dat'):
-                parsed_data = parse_sq_show_file(file_content)
-            elif filename.lower().endswith('.emo'):
-                parsed_data = parse_lv1_show_file(file_content)
-            elif filename.lower().endswith('.session'):
-                parsed_data = parse_s_series_show_file(file_content)
-            elif filename.lower().endswith('.ses'):
-                parsed_data = parse_ses_show_file(file_content)
-            else:
-                parsed_data = parse_digico_rtf(file_content)
+            # Parse with the parsers' diagnostic output discarded: in the hosted
+            # version server output becomes the host's logs, and it can include
+            # channel names. Nothing from a user's file is printed, stored or logged.
+            with contextlib.redirect_stdout(io.StringIO()):
+                parsed_data = parse_show_file(filename, file_content)
 
             # Ensure every channel has the is_default field (parsers that don't set it → False)
             for section in parsed_data.values():
