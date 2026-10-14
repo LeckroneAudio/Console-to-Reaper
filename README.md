@@ -1,4 +1,4 @@
-Console to Reaper v4.1
+Console to Reaper v4.2
 ======================
 
 Try it hosted, no install needed: https://consoleconverter.com
@@ -187,5 +187,5 @@ CHANNEL TYPES:
 
 Built by: Michael Leckrone
 Contact: leckroneaudio@gmail.com
-Version: 4.1
+Version: 4.2
 GitHub: github.com/LeckroneAudio/Console-to-Reaper

@@ -1,0 +1,70 @@
+# Builds the Windows app (Console to Reaper.exe) on GitHub's Windows machines.
+#
+# - Push a version tag (git tag v4.2 && git push origin v4.2): builds the .exe
+#   and attaches it to a DRAFT release for that tag. Add the Mac .dmg and the
+#   .zip to the draft on GitHub, then publish it.
+# - Actions tab > Build Windows app > Run workflow: test build only; the .exe
+#   is under the run's Artifacts.
+
+name: Build Windows app
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # create the draft release and upload the .exe
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build with PyInstaller
+        run: python build_windows.py
+
+      - name: Name the .exe for this version
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0,7))" }
+          Rename-Item "dist/Console to Reaper.exe" "Console.to.Reaper.$version.exe"
+          "EXE=dist/Console.to.Reaper.$version.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Check the built app runs and serves the DiGiPanion parser
+        shell: pwsh
+        run: |
+          # Headless web mode: no tray icon, serves the page on $PORT
+          $env:CONSOLE_TO_REAPER_WEB = '1'
+          $env:PORT = '8765'
+          $app = Start-Process -FilePath $env:EXE -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 30 -and -not $ok; $i++) {
+            Start-Sleep -Seconds 2
+            try {
+              $page = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8765/
+              $parser = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8765/digipanion.js
+              $ok = $page.Content.Contains('Console to Reaper') -and $parser.Content.Contains('digipanionParseSession')
+            } catch { }
+          }
+          Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw 'The built .exe did not serve the page with the DiGiPanion parser' }
+          Write-Host 'OK: page and parser served'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: ${{ env.EXE }}
+
+      - name: Attach to a draft release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: Console to Reaper ${{ github.ref_name }}
+          files: ${{ env.EXE }}

@@ -43,6 +43,9 @@ def main():
         # collect everything so the tray icon doesn't silently fail to load.
         '--collect-all=pystray',
         '--collect-all=PIL',
+        # Imported inside try/except (the app runs without it), so name it
+        # explicitly: without it .ses files lose the Copy Audio record order.
+        '--hidden-import=digipanion_bundle',
     ])
 
     print('\nBuilt: dist/Console to Reaper.exe')
